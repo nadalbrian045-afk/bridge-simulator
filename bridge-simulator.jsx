@@ -1,0 +1,950 @@
+import React, { useState, useMemo } from "react";
+
+/* ============================================================
+   材料データベース（目安値。実際は現地で計量・現物確認すること）
+   E: ヤング係数 Pa / density: kg/m3 / 断面形状情報
+   compressive/tensile: 許容応力の概算 (Pa)
+   tensionOnly: 圧縮を負担できない部材（凧糸・針金）
+   ============================================================ */
+const MATERIALS = {
+  hinoki10: {
+    label: "ヒノキ角棒 10×10mm",
+    E: 9e9,
+    density: 400,
+    shape: "square",
+    size: 0.01,
+    compressive: 28e6,
+    tensile: 55e6,
+    tensionOnly: false,
+  },
+  hinoki5: {
+    label: "ヒノキ角棒 5×5mm",
+    E: 9e9,
+    density: 400,
+    shape: "square",
+    size: 0.005,
+    compressive: 28e6,
+    tensile: 55e6,
+    tensionOnly: false,
+  },
+  bamboo: {
+    label: "竹ひご φ1.8mm",
+    E: 16e9,
+    density: 700,
+    shape: "round",
+    size: 0.0018,
+    compressive: 35e6,
+    tensile: 110e6,
+    tensionOnly: false,
+  },
+  kiteString: {
+    label: "凧糸（純綿水糸）",
+    E: 4e9,
+    density: 1300,
+    shape: "round",
+    size: 0.001,
+    compressive: 0,
+    tensile: 140,      // N（面積不定のため断面応力でなくN目安）
+    tensileIsForce: true,
+    tensionOnly: true,
+  },
+  wire30: {
+    label: "針金（30番）",
+    E: 190e9,
+    density: 7850,
+    shape: "round",
+    size: 0.00026,
+    compressive: 0,
+    tensile: 50,       // N 目安
+    tensileIsForce: true,
+    tensionOnly: true,
+  },
+};
+
+const DEPARTMENT = { label: "会場製作部門", span: 1.0, loadKg: 25 + 0.35, deflectionLimit: 50 };
+
+// 会場製作部門の支給材料一式を全て使い切った場合の概算総重量（g）。
+// 実施要領P4の支給材リストと下記の材料DBの密度から概算したものであり、公式発表値ではない。
+// 審査基準（P11）は「経済性＝最小重量25点／支給材全重量0点で比例配分」なので、
+// この値は自分の設計がその範囲のどのあたりに位置するかを見る参考の目安にすぎない。
+// ヒノキ角棒10×10×900mm×10, 5×5×900mm×10, バルサ板80×3×600mm×8, アガチス板80×3×600mm×2,
+// 竹ひごφ1.8×900mm×30, 凧糸30m, 針金5m, ボンド180g, アロンアルファ計6g の概算合計。
+const SUPPLY_TOTAL_G = 1020;
+
+// 会場製作部門の支給材料一式（実施要領P4）のうち、このツールで使う線材の支給量。
+// 単位m。実際には主構造以外（対傾構・床板固定など）にも同じ材料を使う可能性があるため、
+// ここでの「使用率」はあくまで主構造分だけの目安。100%に近い・超える場合は要注意。
+const SUPPLY_LENGTH_M = {
+  hinoki10: 9,   // 10×10×900mm×10本
+  hinoki5: 9,    // 5×5×900mm×10本
+  bamboo: 27,    // φ1.8×900mm×30本
+  kiteString: 30,
+  wire30: 5,
+};
+
+const G = 9.81;
+
+/* ============================================================
+   断面性能
+   ============================================================ */
+function sectionProps(mat, bundle) {
+  let A, I;
+  if (mat.shape === "square") {
+    A = mat.size * mat.size;
+    I = Math.pow(mat.size, 4) / 12;
+  } else {
+    const r = mat.size / 2;
+    A = Math.PI * r * r;
+    I = (Math.PI * Math.pow(mat.size, 4)) / 64;
+  }
+  return { A: A * bundle, I: I * bundle };
+}
+
+/* ============================================================
+   構造ジオメトリ生成
+   すべて「支間長 span[m] のトラス」として統一的に FEM で解く。
+   下弦＝道路面（載荷点・支承点）、上弦＝アーチ／トラス上弦。
+   ============================================================ */
+function buildTrussGirder(span, depth, panels) {
+  const nodes = [];
+  const bottomIds = [];
+  const topIds = [];
+  for (let i = 0; i <= panels; i++) {
+    bottomIds.push(nodes.length);
+    nodes.push({ x: (i * span) / panels, y: 0 });
+  }
+  for (let i = 0; i <= panels; i++) {
+    topIds.push(nodes.length);
+    nodes.push({ x: (i * span) / panels, y: depth });
+  }
+  const members = [];
+  for (let i = 0; i < panels; i++)
+    members.push({ n1: bottomIds[i], n2: bottomIds[i + 1], group: "bottomChord" });
+  for (let i = 0; i < panels; i++)
+    members.push({ n1: topIds[i], n2: topIds[i + 1], group: "topChord" });
+  for (let i = 0; i <= panels; i++)
+    members.push({ n1: bottomIds[i], n2: topIds[i], group: "verticals" });
+  for (let i = 0; i < panels; i++) {
+    if (i % 2 === 0) members.push({ n1: bottomIds[i], n2: topIds[i + 1], group: "diagonals" });
+    else members.push({ n1: topIds[i], n2: bottomIds[i + 1], group: "diagonals" });
+  }
+  return {
+    nodes,
+    members,
+    supports: { left: bottomIds[0], right: bottomIds[panels] },
+    loadNode: bottomIds[Math.round(panels / 2)],
+    towerBaseNode: bottomIds[Math.round(panels / 2)],
+    cableAnchorNodes: [
+      bottomIds[Math.round(panels * 0.2)],
+      bottomIds[Math.round(panels * 0.8)],
+    ],
+  };
+}
+
+function buildBowstring(span, rise, panels, springHeight) {
+  // springHeight: 支間端でのアーチ立ち上がり高さ。0だと端で上弦と下弦(タイ)が
+  // 同じ座標に重なり、長さ0の垂直材ができてFEMが破綻する（剛性が∞→NaN）ため、
+  // 必ず正の値を持たせる。
+  const base = buildTrussGirder(span, rise, panels);
+  for (let i = 0; i <= panels; i++) {
+    const topId = panels + 1 + i;
+    const x = base.nodes[topId].x;
+    base.nodes[topId].y = springHeight + (4 * rise * x * (span - x)) / (span * span);
+  }
+  return base;
+}
+
+function buildCableStayed(span, depth, panels, towerHeight, towerRatio, cableCount, cableStartRatio, cableEndRatio) {
+  const base = buildTrussGirder(span, depth, panels);
+  const towerBaseNode = Math.max(0, Math.min(panels, Math.round(towerRatio * panels)));
+  const towerTop = base.nodes.length;
+  base.nodes.push({
+    x: base.nodes[towerBaseNode].x,
+    y: depth + towerHeight,
+  });
+  const members = base.members.slice();
+  members.push({ n1: towerBaseNode, n2: towerTop, group: "tower" });
+
+  const anchorSet = new Set();
+  for (let k = 0; k < cableCount; k++) {
+    const ratio =
+      cableCount === 1
+        ? (cableStartRatio + cableEndRatio) / 2
+        : cableStartRatio + (k * (cableEndRatio - cableStartRatio)) / (cableCount - 1);
+    const idx = Math.max(0, Math.min(panels, Math.round(ratio * panels)));
+    if (idx !== towerBaseNode) anchorSet.add(idx);
+  }
+  const cableAnchorNodes = [...anchorSet];
+  cableAnchorNodes.forEach((nid) => members.push({ n1: towerTop, n2: nid, group: "cables" }));
+
+  return { ...base, members, towerTop, towerBaseNode, cableAnchorNodes };
+}
+
+/* ============================================================
+   張弦梁トラス（案A・king-post/stress-ribbon型）ジオメトリ生成
+   桁（bottomChord・道路面・圧縮直材）はy=0の直線のまま、その下側（y<0）に
+   引張ケーブル（ribbonCable）を垂れ下げ、束材（verticals）と斜材（diagonals）で
+   結ぶ。荷重・支承はbottomChordに載る点はトラス桁橋と同じ。
+   sag: 中央でのケーブル垂れ下がり量、endOffset: 支間端でのケーブル位置
+   （桁からのわずかな下方オフセット。0だと桁端とケーブル端が同座標になり
+   長さ0の垂直材でNaNになるため必ず正の値を持たせる）。
+   ============================================================ */
+function buildStressRibbon(span, sag, panels, endOffset) {
+  const nodes = [];
+  const bottomIds = [];
+  const cableIds = [];
+  for (let i = 0; i <= panels; i++) { bottomIds.push(nodes.length); nodes.push({ x: (i * span) / panels, y: 0 }); }
+  for (let i = 0; i <= panels; i++) {
+    const x = (i * span) / panels;
+    cableIds.push(nodes.length);
+    nodes.push({ x, y: -(endOffset + (4 * sag * x * (span - x)) / (span * span)) });
+  }
+  const members = [];
+  for (let i = 0; i < panels; i++)
+    members.push({ n1: bottomIds[i], n2: bottomIds[i + 1], group: "bottomChord" });
+  for (let i = 0; i < panels; i++)
+    members.push({ n1: cableIds[i], n2: cableIds[i + 1], group: "ribbonCable" });
+  for (let i = 0; i <= panels; i++)
+    members.push({ n1: bottomIds[i], n2: cableIds[i], group: "verticals" });
+  for (let i = 0; i < panels; i++) {
+    if (i % 2 === 0) members.push({ n1: bottomIds[i], n2: cableIds[i + 1], group: "diagonals" });
+    else members.push({ n1: cableIds[i], n2: bottomIds[i + 1], group: "diagonals" });
+  }
+  return {
+    nodes,
+    members,
+    supports: { left: bottomIds[0], right: bottomIds[panels] },
+    loadNode: bottomIds[Math.round(panels / 2)],
+  };
+}
+
+// 座標が一致してしまった節点間の長さ0の部材を除去する安全策
+function cleanGeom(geom) {
+  const EPS = 1e-6;
+  const members = geom.members.filter((m) => {
+    const p1 = geom.nodes[m.n1];
+    const p2 = geom.nodes[m.n2];
+    return Math.hypot(p2.x - p1.x, p2.y - p1.y) > EPS;
+  });
+  return { ...geom, members };
+}
+
+/* ============================================================
+   2D トラス有限要素法（direct stiffness method）
+   支承は「鉛直反力のみ」＝両支点ともローラー相当（規定どおり水平力非負担）。
+   左支点の x 自由度だけ数値安定化のため仮固定し、その水平反力を
+   「水平自碇性（自己釣合い）」の指標として表示する。
+   ============================================================ */
+function solveGaussian(A, b) {
+  const n = b.length;
+  const M = A.map((row, i) => row.concat([b[i]]));
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    [M[col], M[piv]] = [M[piv], M[col]];
+    if (Math.abs(M[col][col]) < 1e-12) continue;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const f = M[r][col] / M[col][col];
+      for (let c = col; c <= n; c++) M[r][c] -= f * M[col][c];
+    }
+  }
+  return M.map((row, i) => (Math.abs(M[i][i]) < 1e-12 ? 0 : row[n] / M[i][i]));
+}
+
+function solveTruss(nodes, membersWithProps, loads, fixedDofs) {
+  const ndof = nodes.length * 2;
+  const K = Array.from({ length: ndof }, () => new Array(ndof).fill(0));
+  const memberGeom = membersWithProps.map((m) => {
+    const p1 = nodes[m.n1];
+    const p2 = nodes[m.n2];
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const L = Math.hypot(dx, dy);
+    const c = dx / L;
+    const s = dy / L;
+    const k = (m.E * m.A) / L;
+    return { ...m, L, c, s, k };
+  });
+
+  memberGeom.forEach((m) => {
+    const { c, s, k, n1, n2 } = m;
+    const ke = [
+      [k * c * c, k * c * s, -k * c * c, -k * c * s],
+      [k * c * s, k * s * s, -k * c * s, -k * s * s],
+      [-k * c * c, -k * c * s, k * c * c, k * c * s],
+      [-k * c * s, -k * s * s, k * c * s, k * s * s],
+    ];
+    const map = [2 * n1, 2 * n1 + 1, 2 * n2, 2 * n2 + 1];
+    for (let a = 0; a < 4; a++)
+      for (let b2 = 0; b2 < 4; b2++) K[map[a]][map[b2]] += ke[a][b2];
+  });
+
+  const fixed = new Set(fixedDofs);
+  const free = [];
+  for (let i = 0; i < ndof; i++) if (!fixed.has(i)) free.push(i);
+
+  const Kff = free.map((r) => free.map((c) => K[r][c]));
+  const Ff = free.map((r) => loads[r] || 0);
+  const Uf = solveGaussian(Kff, Ff);
+
+  const U = new Array(ndof).fill(0);
+  free.forEach((dof, idx) => (U[dof] = Uf[idx]));
+
+  // 任意の自由度の反力を後から問い合わせられるクロージャ
+  const reactionAt = (dof) => {
+    let val = 0;
+    for (let c = 0; c < ndof; c++) val += K[dof][c] * U[c];
+    return val - (loads[dof] || 0);
+  };
+
+  const forces = memberGeom.map((m) => {
+    const u1x = U[2 * m.n1], u1y = U[2 * m.n1 + 1];
+    const u2x = U[2 * m.n2], u2y = U[2 * m.n2 + 1];
+    const e = (u2x - u1x) * m.c + (u2y - u1y) * m.s;
+    const N = m.k * e; // 引張正
+    return N;
+  });
+
+  return { U, reactionAt, forces };
+}
+
+/* ============================================================
+   吊橋（夢のかけ橋タイプ／箱ヶ瀬橋）ジオメトリ生成
+   デッキは通常のトラス桁（支承2点で支持）とし、その上に主塔・main
+   cable・ハンガーを追加する。ケーブル端は支間の外側にある「アンカー
+   節点」に完全固定（x,y）する＝載荷装置の調整用ワイヤー固定点の idealize。
+   実際のオフセット・高さは事務局が用意する治具の実寸に依存するため、
+   ここではPDF記載の例（調整用ワイヤー200mm・複数の固定点）を参考にした
+   概算値をデフォルトにしている。必ず事務局に確認すること。
+   ============================================================ */
+function buildSuspension(span, depth, panels, towerInsetRatio, towerHeight, cableSagMM, anchorOffsetMM, anchorHeightMM) {
+  const base = buildTrussGirder(span, depth, panels);
+  let idxLeft = Math.max(0, Math.min(panels, Math.round(towerInsetRatio * panels)));
+  let idxRight = panels - idxLeft;
+  if (idxRight <= idxLeft) { idxLeft = Math.max(0, Math.floor(panels / 2) - 1); idxRight = panels - idxLeft; }
+
+  const nodes = base.nodes.slice();
+  const members = base.members.slice();
+  const towerTopY = depth + towerHeight;
+
+  const towerLeftTop = nodes.length;
+  nodes.push({ x: nodes[idxLeft].x, y: towerTopY });
+  const towerRightTop = nodes.length;
+  nodes.push({ x: nodes[idxRight].x, y: towerTopY });
+  members.push({ n1: idxLeft, n2: towerLeftTop, group: "tower" });
+  members.push({ n1: idxRight, n2: towerRightTop, group: "tower" });
+
+  const xL = nodes[towerLeftTop].x, xR = nodes[towerRightTop].x;
+  const cableChain = [towerLeftTop];
+  const hangerPairs = [];
+  for (let i = idxLeft + 1; i < idxRight; i++) {
+    const x = nodes[i].x;
+    const t = (x - xL) / (xR - xL);
+    const sag = (cableSagMM / 1000) * 4 * t * (1 - t);
+    const cid = nodes.length;
+    nodes.push({ x, y: towerTopY - sag });
+    cableChain.push(cid);
+    hangerPairs.push([cid, i]);
+  }
+  cableChain.push(towerRightTop);
+  for (let k = 0; k < cableChain.length - 1; k++)
+    members.push({ n1: cableChain[k], n2: cableChain[k + 1], group: "mainCable" });
+  hangerPairs.forEach(([cid, did]) => members.push({ n1: cid, n2: did, group: "hangers" }));
+
+  const anchorLeft = nodes.length;
+  nodes.push({ x: xL - anchorOffsetMM / 1000, y: anchorHeightMM / 1000 });
+  const anchorRight = nodes.length;
+  nodes.push({ x: xR + anchorOffsetMM / 1000, y: anchorHeightMM / 1000 });
+  members.push({ n1: anchorLeft, n2: towerLeftTop, group: "mainCable" });
+  members.push({ n1: towerRightTop, n2: anchorRight, group: "mainCable" });
+
+  return { nodes, members, supports: base.supports, loadNode: base.loadNode, anchors: [anchorLeft, anchorRight] };
+}
+
+/* ============================================================
+   構造タイプ定義
+   ============================================================ */
+const GROUP_LABELS = {
+  bottomChord: "下弦材（道路面）",
+  topChord: "上弦材",
+  verticals: "垂直材",
+  diagonals: "斜材",
+  tower: "主塔",
+  cables: "ケーブル",
+  mainCable: "主ケーブル",
+  hangers: "ハンガー（吊り材）",
+  ribbonCable: "張弦ケーブル（桁下・引張）",
+};
+
+const STRUCT_TYPES = {
+  truss: { label: "トラス桁橋", groups: ["bottomChord", "topChord", "verticals", "diagonals"] },
+  bowstring: { label: "タイドアーチ（ボウストリング）", groups: ["bottomChord", "topChord", "verticals", "diagonals"] },
+  stressribbon: { label: "張弦梁トラス（案A）", groups: ["bottomChord", "ribbonCable", "verticals", "diagonals"] },
+  cablestayed: { label: "自碇式斜張橋", groups: ["bottomChord", "topChord", "verticals", "diagonals", "tower", "cables"] },
+  suspension: { label: "吊橋（夢のかけ橋タイプ）", groups: ["bottomChord", "topChord", "verticals", "diagonals", "tower", "mainCable", "hangers"] },
+};
+
+const cableOnlyMats = ["kiteString", "wire30", "bamboo"];
+const cableOnlyGroups = ["cables", "mainCable", "hangers", "ribbonCable"];
+const allMats = ["hinoki10", "hinoki5", "bamboo", "kiteString", "wire30"];
+
+export default function BridgeSimulator() {
+  const D = DEPARTMENT;
+  const [structType, setStructType] = useState("truss");
+  const [structureCount, setStructureCount] = useState(1); // 1=単一主構造が全荷重負担 / 2=左右2主構造で荷重を折半
+  const [panels, setPanels] = useState(6);
+  const [depthMM, setDepthMM] = useState(120);
+  const [springHeightMM, setSpringHeightMM] = useState(20); // ボウストリング：支間端のアーチ立ち上がり高さ
+  const [sagMM, setSagMM] = useState(120); // 張弦梁：中央でのケーブル垂れ下がり量
+  const [endOffsetMM, setEndOffsetMM] = useState(25); // 張弦梁：支間端でのケーブル位置（桁からの下方オフセット）
+  const [towerHeightMM, setTowerHeightMM] = useState(200);
+  const [towerRatio, setTowerRatio] = useState(0); // 0=左支点の真上 / 1=右支点の真上（自碇式斜張橋用）
+  const [cableCount, setCableCount] = useState(3);
+  const [cableStartRatio, setCableStartRatio] = useState(0.35);
+  const [cableEndRatio, setCableEndRatio] = useState(0.95);
+  const [towerInsetRatio, setTowerInsetRatio] = useState(0.12); // 吊橋：支点から主塔までの支間比
+  const [cableSagMM, setCableSagMM] = useState(150); // 吊橋：主塔間でのケーブルのたるみ量
+  const [anchorOffsetMM, setAnchorOffsetMM] = useState(300); // 吊橋：主塔からアンカー点までの水平距離（要事務局確認）
+  const [anchorHeightMM, setAnchorHeightMM] = useState(40); // 吊橋：アンカー点の高さ（要事務局確認）
+  const [exaggeration, setExaggeration] = useState(6);
+
+  const [matSel, setMatSel] = useState({
+    bottomChord: "hinoki10",
+    topChord: "hinoki10",
+    verticals: "hinoki5",
+    diagonals: "hinoki5",
+    tower: "hinoki10",
+    cables: "kiteString",
+    mainCable: "kiteString",
+    hangers: "kiteString",
+    ribbonCable: "kiteString",
+  });
+  const [bundleSel, setBundleSel] = useState({
+    bottomChord: 1, topChord: 1, verticals: 1, diagonals: 1, tower: 1, cables: 1, mainCable: 1, hangers: 1, ribbonCable: 3,
+  });
+
+  const geom = useMemo(() => {
+    const span = D.span;
+    if (structType === "truss") return cleanGeom(buildTrussGirder(span, depthMM / 1000, panels));
+    if (structType === "bowstring")
+      return cleanGeom(buildBowstring(span, depthMM / 1000, panels, springHeightMM / 1000));
+    if (structType === "stressribbon")
+      return cleanGeom(buildStressRibbon(span, sagMM / 1000, panels, endOffsetMM / 1000));
+    if (structType === "cablestayed")
+      return cleanGeom(
+        buildCableStayed(
+          span, depthMM / 1000, panels, towerHeightMM / 1000,
+          towerRatio, cableCount, cableStartRatio, cableEndRatio
+        )
+      );
+    return cleanGeom(
+      buildSuspension(
+        span, depthMM / 1000, panels, towerInsetRatio, towerHeightMM / 1000,
+        cableSagMM, anchorOffsetMM, anchorHeightMM
+      )
+    );
+  }, [
+    structType, panels, depthMM, springHeightMM, sagMM, endOffsetMM, towerHeightMM, towerRatio,
+    cableCount, cableStartRatio, cableEndRatio, towerInsetRatio, cableSagMM,
+    anchorOffsetMM, anchorHeightMM, D.span,
+  ]);
+
+  const result = useMemo(() => {
+    const membersWithProps = geom.members.map((m) => {
+      const mat = MATERIALS[matSel[m.group]];
+      const bundle = bundleSel[m.group] || 1;
+      const { A, I } = sectionProps(mat, bundle);
+      return { ...m, E: mat.E, A, I, mat, bundle };
+    });
+
+    // 自重（節点集中荷重として下向きに配分）／材料別の使用長さ（支給量チェック用）
+    const ndof = geom.nodes.length * 2;
+    const loads = new Array(ndof).fill(0);
+    let totalWeightKg = 0;
+    const lengthByMaterialM = {};
+    membersWithProps.forEach((m) => {
+      const p1 = geom.nodes[m.n1];
+      const p2 = geom.nodes[m.n2];
+      const L = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      const wKg = L * m.A * m.mat.density;
+      totalWeightKg += wKg;
+      const half = (-wKg * G) / 2;
+      loads[2 * m.n1 + 1] += half;
+      loads[2 * m.n2 + 1] += half;
+      const matKey = matSel[m.group];
+      lengthByMaterialM[matKey] = (lengthByMaterialM[matKey] || 0) + L * m.bundle;
+    });
+    // 実物は主構造をstructureCount枚並べるため、使用量もその倍率で換算（対傾構・床板分は含まないため下限の目安）
+    Object.keys(lengthByMaterialM).forEach((k) => { lengthByMaterialM[k] *= structureCount; });
+    const P = (D.loadKg / structureCount) * G;
+    loads[2 * geom.loadNode + 1] += -P;
+
+    // 固定自由度：支承（左x,y／右y）＋ 吊橋の場合は外部アンカー(x,y)も完全固定
+    const fixedDofs = [2 * geom.supports.left, 2 * geom.supports.left + 1, 2 * geom.supports.right + 1];
+    if (geom.anchors) geom.anchors.forEach((a) => fixedDofs.push(2 * a, 2 * a + 1));
+
+    const solved = solveTruss(geom.nodes, membersWithProps, loads, fixedDofs);
+
+    const deflectionMM = Math.abs(solved.U[2 * geom.loadNode + 1]) * 1000;
+
+    // 安全率 = 部材が壊れる耐力 ÷ 実際に生じている力（大きいほど余裕がある。1.0未満で破壊）
+    const memberChecks = membersWithProps.map((m, i) => {
+      const N = solved.forces[i];
+      const p1 = geom.nodes[m.n1];
+      const p2 = geom.nodes[m.n2];
+      const L = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      let safetyFactor = Infinity;
+      let status = "ok";
+      const NOISE = 0.05; // N未満の力は実質ゼロとみなす（数値誤差対策）
+      if (N >= -NOISE) {
+        // 引張（またはほぼゼロ）
+        const cap = m.mat.tensileIsForce ? m.mat.tensile * m.bundle : m.mat.tensile * m.A;
+        safetyFactor = N > NOISE ? cap / N : Infinity;
+      } else {
+        // 圧縮
+        if (m.mat.tensionOnly) {
+          safetyFactor = 0; // 引張専用材に圧縮力→即アウト
+          status = "invalid";
+        } else {
+          const Pcr = (Math.PI * Math.PI * m.E * m.I) / (L * L);
+          const crushCap = m.mat.compressive * m.A;
+          const cap = Math.min(Pcr, crushCap);
+          safetyFactor = Math.abs(N) > 1e-9 ? cap / Math.abs(N) : Infinity;
+        }
+      }
+      if (status !== "invalid") status = safetyFactor < 1 ? "fail" : safetyFactor < 1.3 ? "warn" : "ok";
+      return { ...m, N, L, safetyFactor, status };
+    });
+
+    const minSafetyFactor = memberChecks.reduce((acc, m) => Math.min(acc, m.safetyFactor), Infinity);
+    const horizontalThrust = Math.abs(solved.reactionAt(2 * geom.supports.left));
+    const selfAnchorRatio = horizontalThrust / P;
+    const anchorReactions = geom.anchors
+      ? geom.anchors.map((a) => Math.hypot(solved.reactionAt(2 * a), solved.reactionAt(2 * a + 1)))
+      : null;
+
+    return {
+      membersWithProps: memberChecks,
+      totalWeightKg,
+      deflectionMM,
+      minSafetyFactor,
+      horizontalThrust,
+      selfAnchorRatio,
+      anchorReactions,
+      lengthByMaterialM,
+      U: solved.U,
+      loadNode: geom.loadNode,
+    };
+  }, [geom, matSel, bundleSel, D.loadKg, structureCount]);
+
+  // --- SVG 描画用スケール ---
+  const svgW = 640, svgH = 320, margin = 40;
+  const xs = geom.nodes.map((n) => n.x);
+  const ys = geom.nodes.map((n) => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys, 0), maxY = Math.max(...ys, 0.001);
+  const scale = Math.min((svgW - 2 * margin) / (maxX - minX || 1), (svgH - 2 * margin) / (maxY - minY || 1));
+  const toSvg = (x, y, dx = 0, dy = 0) => {
+    const ux = x + dx * exaggeration;
+    const uy = y + dy * exaggeration;
+    return [margin + (ux - minX) * scale, svgH - margin - (uy - minY) * scale];
+  };
+
+  const colorFor = (m) => {
+    if (m.status === "invalid") return "#c026d3";
+    if (m.status === "fail") return "#dc2626";
+    if (m.status === "warn") return "#d97706";
+    return m.N >= 0 ? "#2563eb" : "#334155";
+  };
+
+  const deflPass = result.deflectionMM <= D.deflectionLimit;
+  const strengthPass = result.minSafetyFactor >= 1;
+  const anchorPass = result.selfAnchorRatio < 0.03;
+
+  const groups = STRUCT_TYPES[structType].groups;
+
+  return (
+    <div style={{ fontFamily: "ui-sans-serif, system-ui", background: "#f5f2ea", minHeight: "100vh", padding: "24px 16px", color: "#1c2333" }}>
+      <div style={{ maxWidth: 980, margin: "0 auto" }}>
+        <header style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#8a6d3b", fontWeight: 700, textTransform: "uppercase" }}>
+            橋梁模型製作コンテスト・構造検討ツール
+          </div>
+          <h1 style={{ fontSize: 26, fontWeight: 800, margin: "4px 0 0", fontFamily: "Georgia, serif" }}>
+            構造形式シミュレータ
+          </h1>
+          <p style={{ fontSize: 13, color: "#5b6270", marginTop: 4, lineHeight: 1.6 }}>
+            トラス／タイドアーチ／自碇式斜張／吊橋の4形式を同一のFEMエンジンで比較します。数値は材料の概算値に基づく目安であり、実際は現物計量・現地の載荷試験で必ず検証してください。
+          </p>
+        </header>
+
+        {/* 部門固定表示・構造タイプ */}
+        <div style={{ fontSize: 12, color: "#5b6270", marginBottom: 12 }}>
+          {D.label}固定：支間 {D.span * 1000}mm ／ 載荷 {D.loadKg.toFixed(1)}kg ／ たわみ限度 {D.deflectionLimit}mm
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {Object.entries(STRUCT_TYPES).map(([key, s]) => (
+            <button key={key} onClick={() => setStructType(key)}
+              style={tabStyle(structType === key, "#1c2333")}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {/* 幅方向（奥行き）の扱い */}
+        <div style={{ ...panelStyle, marginBottom: 20, background: "#f6f2e6" }}>
+          <SectionTitle>幅方向（奥行き）の扱い ― このツールは2次元です</SectionTitle>
+          <p style={{ fontSize: 12, color: "#5b6270", lineHeight: 1.7, margin: "0 0 10px" }}>
+            計算しているのは支間方向の鉛直面内トラス1枚分だけです。実際の模型は道路面幅80mm以上を確保するため、
+            主構造を橋軸方向に1枚だけ通す設計と、幅方向に2枚並べて上下または左右の部材でつなぐ設計があります。
+            荷重（載荷用金具）は路面中央にほぼ均等にかかるため、<b>2枚の主構造で受ける設計なら、1枚あたりの負担荷重は全体の半分</b>になります。
+            どちらの構成を検討しているか選んでください（下の計算に反映されます）。
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setStructureCount(1)} style={tabStyle(structureCount === 1, "#8a6d3b")}>
+              単一主構造（全荷重 {D.loadKg.toFixed(1)}kg を1枚で負担）
+            </button>
+            <button onClick={() => setStructureCount(2)} style={tabStyle(structureCount === 2, "#8a6d3b")}>
+              2主構造（1枚あたり {(D.loadKg / 2).toFixed(1)}kg）
+            </button>
+          </div>
+          {structureCount === 2 && (
+            <p style={{ fontSize: 11, color: "#8a6d3b", marginTop: 8 }}>
+              ※ 表示される重量はこの1枚分です。実際の模型全体の重量は主構造2枚＋横つなぎ材＋床板の分だけこれより重くなります。
+              また幅方向の座屈・転倒を防ぐため、上弦材どうしを結ぶ水平方向のブレース（対傾構）を必ず入れてください（このツールでは検証できません）。
+            </p>
+          )}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
+          {/* 左：パラメータ */}
+          <div style={panelStyle}>
+            <SectionTitle>形状パラメータ</SectionTitle>
+            <NumberField label="パネル数（偶数推奨）" value={panels}
+              onChange={(v) => setPanels(Math.max(2, Math.min(12, v)))} min={2} max={12} step={2} />
+            {structType !== "stressribbon" && (
+              <NumberField label={structType === "bowstring" ? "アーチ・ライズ (mm)" : "トラス桁高 (mm)"}
+                value={depthMM} onChange={setDepthMM} min={20} max={300} step={5} />
+            )}
+            {structType === "bowstring" && (
+              <NumberField label="アーチ立ち上がり高さ (mm)" value={springHeightMM}
+                onChange={(v) => setSpringHeightMM(Math.max(2, v))} min={2} max={100} step={2} />
+            )}
+            {structType === "stressribbon" && (
+              <>
+                <NumberField label="ケーブル垂れ下がり量（中央・mm）" value={sagMM}
+                  onChange={(v) => setSagMM(Math.max(10, v))} min={10} max={300} step={5} />
+                <NumberField label="ケーブル端オフセット（支間端・mm）" value={endOffsetMM}
+                  onChange={(v) => setEndOffsetMM(Math.max(2, v))} min={2} max={100} step={2} />
+                <p style={{ fontSize: 11, color: "#8a6d3b", lineHeight: 1.6, marginTop: -2 }}>
+                  ※ 桁（道路面）はy=0の直線のまま、その下にケーブルを垂れ下げて束材（King post）で吊る構成です。
+                  桁は圧縮直材、ケーブルは引張専用材（凧糸・針金）を想定しています。垂れ下がり量を大きくするほど
+                  ケーブルの張力効率は上がりますが、模型の高さ（桁下のクリアランス）が必要になります。
+                </p>
+              </>
+            )}
+            {structType === "cablestayed" && (
+              <>
+                <NumberField label="主塔高さ (mm)" value={towerHeightMM} onChange={setTowerHeightMM} min={50} max={400} step={10} />
+                <NumberField label="主塔位置（0=左支点上／1=右支点上）" value={towerRatio}
+                  onChange={(v) => setTowerRatio(Math.max(0, Math.min(1, v)))} min={0} max={1} step={0.05} />
+                <NumberField label="ケーブル本数" value={cableCount}
+                  onChange={(v) => setCableCount(Math.max(1, Math.min(8, Math.round(v))))} min={1} max={8} step={1} />
+                <NumberField label="ケーブル配置 開始位置（支間比）" value={cableStartRatio}
+                  onChange={(v) => setCableStartRatio(Math.max(0, Math.min(1, v)))} min={0} max={1} step={0.05} />
+                <NumberField label="ケーブル配置 終了位置（支間比）" value={cableEndRatio}
+                  onChange={(v) => setCableEndRatio(Math.max(0, Math.min(1, v)))} min={0} max={1} step={0.05} />
+                <p style={{ fontSize: 11, color: "#8a6d3b", lineHeight: 1.6, marginTop: -2 }}>
+                  ※ 主塔は支間の中で最もたわみが小さい点（＝支点の真上）に立てるのが基本です。
+                  中央付近（載荷点そのもの）に立てると、主塔自体が沈み込んでケーブルが逆に圧縮側になることがあります。
+                  試しに主塔位置を0.5に変えて、ケーブルが「不適合（紫の点線）」に変わる様子を見てみてください。
+                </p>
+              </>
+            )}
+            {structType === "suspension" && (
+              <>
+                <NumberField label="主塔高さ (mm)" value={towerHeightMM} onChange={setTowerHeightMM} min={50} max={400} step={10} />
+                <NumberField label="主塔位置（支点からの支間比 0〜0.4）" value={towerInsetRatio}
+                  onChange={(v) => setTowerInsetRatio(Math.max(0, Math.min(0.4, v)))} min={0} max={0.4} step={0.02} />
+                <NumberField label="ケーブルたるみ量 (mm)" value={cableSagMM} onChange={setCableSagMM} min={20} max={400} step={10} />
+                <NumberField label="アンカー水平オフセット (mm)" value={anchorOffsetMM} onChange={setAnchorOffsetMM} min={50} max={600} step={10} />
+                <NumberField label="アンカー高さ (mm)" value={anchorHeightMM} onChange={setAnchorHeightMM} min={0} max={300} step={10} />
+                <p style={{ fontSize: 11, color: "#8a6d3b", lineHeight: 1.6, marginTop: -2 }}>
+                  ※ 吊橋形式は、ケーブル端を模型の外にある載荷装置の「調整用ワイヤー」固定点（実施要領P5参照）に接続する特殊形式です。
+                  アンカーの位置・高さは治具の実寸に依存するため、この数値はあくまで検討用の仮値です。
+                  <b>実施要領のとおり、吊橋形式を検討する場合は必ず事前に大会事務局へ連絡し、正しい寸法を確認してください。</b>
+                  「左右アンカー反力」カードの値は、その分の力を治具側が受け止める必要がある、という目安として見てください。
+                </p>
+              </>
+            )}
+            <NumberField label="たわみ表示の誇張倍率" value={exaggeration} onChange={setExaggeration} min={1} max={20} step={1} />
+
+            <SectionTitle style={{ marginTop: 16 }}>部材・材料</SectionTitle>
+            {groups.map((g) => (
+              <div key={g} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11, color: "#5b6270", marginBottom: 3 }}>{GROUP_LABELS[g]}</div>
+                <select value={matSel[g]} onChange={(e) => setMatSel({ ...matSel, [g]: e.target.value })}
+                  style={selectStyle}>
+                  {(cableOnlyGroups.includes(g) ? cableOnlyMats : allMats).map((mk) => (
+                    <option key={mk} value={mk}>{MATERIALS[mk].label}</option>
+                  ))}
+                </select>
+                <select value={bundleSel[g]} onChange={(e) => setBundleSel({ ...bundleSel, [g]: Number(e.target.value) })}
+                  style={{ ...selectStyle, marginTop: 4 }}>
+                  {[1, 2, 3].map((n) => <option key={n} value={n}>{n}本束ね</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          {/* 右：図＋結果 */}
+          <div>
+            <div style={panelStyle}>
+              <svg width="100%" viewBox={`0 0 ${svgW} ${svgH}`} style={{ background: "#fbfaf6", border: "1px solid #e2ddcf" }}>
+                {result.membersWithProps.map((m, i) => {
+                  const u1 = geom.nodes[m.n1], u2 = geom.nodes[m.n2];
+                  const d1x = result.U[2 * m.n1], d1y = result.U[2 * m.n1 + 1];
+                  const d2x = result.U[2 * m.n2], d2y = result.U[2 * m.n2 + 1];
+                  const [x1, y1] = toSvg(u1.x, u1.y, d1x, d1y);
+                  const [x2, y2] = toSvg(u2.x, u2.y, d2x, d2y);
+                  const w = m.bundle * (m.mat.shape === "square" ? m.mat.size : m.mat.size) * 1400 + 1;
+                  return (
+                    <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
+                      stroke={colorFor(m)} strokeWidth={Math.min(6, w)}
+                      strokeDasharray={m.status === "invalid" ? "4 3" : "none"} />
+                  );
+                })}
+                {/* 支承記号 */}
+                {[geom.supports.left, geom.supports.right].map((sid, idx) => {
+                  const n = geom.nodes[sid];
+                  const [x, y] = toSvg(n.x, n.y);
+                  return <polygon key={idx} points={`${x - 8},${y + 14} ${x + 8},${y + 14} ${x},${y}`} fill="#8a6d3b" />;
+                })}
+                {/* 吊橋アンカー記号（治具固定点・完全固定） */}
+                {geom.anchors && geom.anchors.map((aid, idx) => {
+                  const n = geom.nodes[aid];
+                  const [x, y] = toSvg(n.x, n.y);
+                  return (
+                    <g key={`anchor-${idx}`}>
+                      <rect x={x - 6} y={y - 6} width="12" height="12" fill="#1c2333" />
+                      <text x={x} y={y + 20} fontSize="9" fill="#1c2333" textAnchor="middle">アンカー</text>
+                    </g>
+                  );
+                })}
+                {/* 荷重矢印 */}
+                {(() => {
+                  const n = geom.nodes[result.loadNode];
+                  const dx = result.U[2 * result.loadNode], dy = result.U[2 * result.loadNode + 1];
+                  const [x, y] = toSvg(n.x, n.y, dx, dy);
+                  return (
+                    <g>
+                      <line x1={x} y1={y - 34} x2={x} y2={y - 4} stroke="#dc2626" strokeWidth="2" markerEnd="url(#arrow)" />
+                      <text x={x + 6} y={y - 20} fontSize="10" fill="#dc2626">{D.loadKg.toFixed(1)}kg</text>
+                    </g>
+                  );
+                })()}
+                <defs>
+                  <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+                    <path d="M0,0 L8,4 L0,8 Z" fill="#dc2626" />
+                  </marker>
+                </defs>
+              </svg>
+              <div style={{ display: "flex", gap: 14, fontSize: 11, color: "#5b6270", marginTop: 6, flexWrap: "wrap" }}>
+                <Legend color="#2563eb" label="引張" />
+                <Legend color="#334155" label="圧縮（安全率1.3以上）" />
+                <Legend color="#d97706" label="安全率1.0〜1.3（要注意）" />
+                <Legend color="#dc2626" label="安全率1.0未満（破壊の恐れ）" />
+                <Legend color="#c026d3" label="不適合部材（引張専用材に圧縮）" />
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
+              <ResultCard label="模型重量（自重・概算）" value={`${(result.totalWeightKg * 1000).toFixed(0)} g`}
+                sub={`支給材全量(概算${SUPPLY_TOTAL_G}g)の${((result.totalWeightKg * 1000 / SUPPLY_TOTAL_G) * 100).toFixed(0)}%`} ok={true} />
+              <ResultCard label="中央たわみ" value={`${result.deflectionMM.toFixed(1)} mm`} sub={`規定 ${D.deflectionLimit}mm 以内`} ok={deflPass} />
+              <ResultCard label="最小安全率" value={result.minSafetyFactor === Infinity ? "—" : `${result.minSafetyFactor.toFixed(2)}`}
+                sub="1.00未満で破壊。2.0前後を目標に" ok={strengthPass} />
+              <ResultCard label="支承の水平反力" value={`${(result.selfAnchorRatio * 100).toFixed(1)}%`} sub="支承は水平力非負担。0%に近いほど安全" ok={anchorPass} />
+              {result.anchorReactions && (
+                <>
+                  <ResultCard label="左アンカー反力（治具負担分）" value={`${result.anchorReactions[0].toFixed(0)} N`} sub="事前に事務局へ要相談" ok={true} />
+                  <ResultCard label="右アンカー反力（治具負担分）" value={`${result.anchorReactions[1].toFixed(0)} N`} sub="事前に事務局へ要相談" ok={true} />
+                </>
+              )}
+            </div>
+
+            <div style={{ ...panelStyle, marginTop: 16 }}>
+              <SectionTitle>材料別 使用長さ（支給量との比較・主構造{structureCount}枚分）</SectionTitle>
+              <p style={{ fontSize: 11, color: "#8a8d97", lineHeight: 1.6, marginTop: -4, marginBottom: 10 }}>
+                特に凧糸・針金はケーブル用途で束ね本数を増やすと安全率は上がりますが、支給総量に対する使用率も跳ね上がります。
+                対傾構・床板固定など主構造以外の用途分は含んでいないため、実際の必要量はこれより多くなります。
+              </p>
+              <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", color: "#5b6270" }}>
+                    <th style={thStyle}>材料</th><th style={thStyle}>使用量</th><th style={thStyle}>支給量</th><th style={thStyle}>使用率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(result.lengthByMaterialM).map(([mk, lenM]) => {
+                    const supply = SUPPLY_LENGTH_M[mk];
+                    const ratio = supply ? (lenM / supply) * 100 : null;
+                    const over = ratio !== null && ratio > 100;
+                    return (
+                      <tr key={mk} style={{ borderTop: "1px solid #ece7d9" }}>
+                        <td style={tdStyle}>{MATERIALS[mk].label}</td>
+                        <td style={tdStyle}>{lenM.toFixed(2)} m</td>
+                        <td style={tdStyle}>{supply != null ? `${supply} m` : "—"}</td>
+                        <td style={{ ...tdStyle, color: over ? "#dc2626" : "#1c2333", fontWeight: over ? 700 : 400 }}>
+                          {ratio != null ? `${ratio.toFixed(0)}%` : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <p style={{ fontSize: 11, color: "#8a8d97", lineHeight: 1.6, marginTop: 8 }}>
+              ※「経済性」は実際の建設コストではなく、審査基準（実施要領P11）が明記するとおり<b>模型の総重量そのもの</b>で評価されます
+              （最小重量のチームが25点、支給材を全部使い切った重量が0点で、その間を比例配分）。
+              軽ければ一律に良い設計というわけではなく、たわみ・安全率を満たした上で「その中でどれだけ軽くできたか」が問われる指標です。
+              上のパーセンテージは支給材全量（概算 {SUPPLY_TOTAL_G}g）に対する比率で、公式の採点基準値ではなく相対比較用の参考値です。
+            </p>
+
+            {!anchorPass && (
+              <div style={warnBoxStyle}>
+                ⚠ 支承（支点）に無視できない水平反力が生じています。支承台は水平力に対抗しない規定のため、このままでは支間端で滑動・落橋のリスクがあります。
+                下弦材（タイ）を強化するか、ケーブル配置を見直して構造内部（吊橋の場合はアンカーへ）で水平力を処理してください。
+              </div>
+            )}
+            {result.membersWithProps.some((m) => m.status === "invalid") && (
+              <div style={warnBoxStyle}>
+                ⚠ 凧糸・針金など引張専用材に圧縮力が発生している部材があります。当該部材の役割（斜材の向きなど）を見直してください。
+              </div>
+            )}
+
+            <div style={{ ...panelStyle, marginTop: 16 }}>
+              <SectionTitle>部材別チェック（安全率が低い順・上位6件）</SectionTitle>
+              <p style={{ fontSize: 11, color: "#8a8d97", lineHeight: 1.6, marginTop: -4, marginBottom: 10 }}>
+                安全率＝その部材が壊れる（引張破断／座屈・圧壊）耐力 ÷ 実際に生じている力。
+                1.00を切ると、模型全体のたわみが規定内でも、その1本が先に破断・座屈して落橋する可能性があります。
+                実物は材料のばらつき・接着部の精度が理想値どおりにいかないため、目安として安全率2.0前後を確保しておくと安心です。
+                「最小安全率」カードは全部材の中で一番厳しい値＝設計上のボトルネックです。
+              </p>
+              <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", color: "#5b6270" }}>
+                    <th style={thStyle}>部位</th><th style={thStyle}>材料</th><th style={thStyle}>力の向き</th><th style={thStyle}>安全率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.membersWithProps
+                    .slice()
+                    .sort((a, b) => a.safetyFactor - b.safetyFactor)
+                    .slice(0, 6)
+                    .map((m, i) => (
+                      <tr key={i} style={{ borderTop: "1px solid #ece7d9" }}>
+                        <td style={tdStyle}>{GROUP_LABELS[m.group]}</td>
+                        <td style={tdStyle}>{m.mat.label}</td>
+                        <td style={tdStyle}>{m.N >= 0 ? "引張" : "圧縮"}</td>
+                        <td style={{ ...tdStyle, color: colorFor(m), fontWeight: 700 }}>
+                          {m.status === "invalid" ? "不適合" : m.safetyFactor === Infinity ? "十分" : m.safetyFactor.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ ...panelStyle, marginTop: 16 }}>
+              <SectionTitle>計算に使用している材料物性値（一般的な目安）</SectionTitle>
+              <p style={{ fontSize: 11, color: "#8a8d97", lineHeight: 1.6, marginTop: -4, marginBottom: 10 }}>
+                いずれも一般的な木材・竹・綿糸・鋼線の代表値からの概算で、支給材そのものを測定した値ではありません。
+                自作の破壊試験の結果に合わせて調整したい場合は、この表の数値をコード内の <code>MATERIALS</code> で書き換えられます。
+              </p>
+              <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", color: "#5b6270" }}>
+                    <th style={thStyle}>材料</th>
+                    <th style={thStyle}>断面寸法</th>
+                    <th style={thStyle}>ヤング係数 E</th>
+                    <th style={thStyle}>密度</th>
+                    <th style={thStyle}>圧縮許容</th>
+                    <th style={thStyle}>引張許容</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(MATERIALS).map(([key, mat]) => (
+                    <tr key={key} style={{ borderTop: "1px solid #ece7d9" }}>
+                      <td style={tdStyle}>{mat.label}</td>
+                      <td style={tdStyle}>{mat.shape === "square" ? `□${(mat.size * 1000).toFixed(1)}mm` : `φ${(mat.size * 1000).toFixed(2)}mm`}</td>
+                      <td style={tdStyle}>{(mat.E / 1e9).toFixed(1)} GPa</td>
+                      <td style={tdStyle}>{mat.density} kg/m³</td>
+                      <td style={tdStyle}>{mat.tensionOnly ? "負担不可" : `${(mat.compressive / 1e6).toFixed(0)} MPa`}</td>
+                      <td style={tdStyle}>{mat.tensileIsForce ? `${mat.tensile} N（線材のため力の値）` : `${(mat.tensile / 1e6).toFixed(0)} MPa`}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <footer style={{ fontSize: 11, color: "#8a8d97", marginTop: 20, lineHeight: 1.7 }}>
+          ※ 材料物性値（E・密度・許容応力）は一般的な目安値であり、支給材の個体差があります。実材料での破壊試験・計量を推奨します。
+          自重は部材端節点への等分布集中荷重として概算しています。座屈は両端ピン柱（K=1）のオイラー式で概算しています。
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function tabStyle(active, activeColor = "#8a6d3b") {
+  return {
+    padding: "8px 12px",
+    fontSize: 12,
+    borderRadius: 6,
+    border: `1px solid ${active ? activeColor : "#d8d2c0"}`,
+    background: active ? activeColor : "#fff",
+    color: active ? "#fff" : "#1c2333",
+    cursor: "pointer",
+    fontWeight: active ? 700 : 500,
+  };
+}
+const panelStyle = { background: "#fff", border: "1px solid #e2ddcf", borderRadius: 8, padding: 16 };
+const selectStyle = { width: "100%", fontSize: 12, padding: "6px 8px", borderRadius: 5, border: "1px solid #d8d2c0", background: "#fff" };
+const thStyle = { padding: "4px 6px", fontWeight: 600 };
+const tdStyle = { padding: "4px 6px" };
+const warnBoxStyle = { marginTop: 12, padding: 12, background: "#fdf0e6", border: "1px solid #e6b98a", borderRadius: 6, fontSize: 12, color: "#7a4a1f", lineHeight: 1.6 };
+
+function SectionTitle({ children, style }) {
+  return <div style={{ fontSize: 12, fontWeight: 700, color: "#1c2333", marginBottom: 8, ...style }}>{children}</div>;
+}
+function NumberField({ label, value, onChange, min, max, step }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 11, color: "#5b6270", marginBottom: 3 }}>{label}</div>
+      <input type="number" value={value} min={min} max={max} step={step}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ width: "100%", fontSize: 13, padding: "6px 8px", borderRadius: 5, border: "1px solid #d8d2c0" }} />
+    </div>
+  );
+}
+function ResultCard({ label, value, sub, ok }) {
+  return (
+    <div style={{ ...panelStyle, borderColor: ok ? "#bcd8c1" : "#e6b3ab", background: ok ? "#f3faf4" : "#fdf2f0" }}>
+      <div style={{ fontSize: 11, color: "#5b6270" }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: ok ? "#2f6845" : "#b23a2e", fontFamily: "ui-monospace, monospace" }}>{value}</div>
+      <div style={{ fontSize: 10, color: "#8a8d97" }}>{sub}</div>
+    </div>
+  );
+}
+function Legend({ color, label }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <span style={{ width: 14, height: 3, background: color, display: "inline-block" }} />{label}
+    </span>
+  );
+}
