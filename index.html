@@ -99,6 +99,16 @@ const SUPPLY_LENGTH_M = {
   wire30: 5,
 };
 
+// 走行面デッキ材（板）。トラス部材ではなく荷重を分配して路面を作るための板で、
+// このツールの軸力トラスFEMでは剛性を評価できないため重量のみ概算に加算する。
+// 密度は一般的なバルサ・アガチス材からの目安値（支給材そのものの実測値ではない）。
+const DECK_MATERIALS = {
+  balsa: { label: "バルサ板 (支給・80×3×600mm)", density: 150, thicknessM: 0.003 },
+  agatis: { label: "アガチス板 (支給・80×3×600mm)", density: 450, thicknessM: 0.003 },
+};
+// 支給枚数（実施要領P4）。デッキに全部使うわけではないが上限の目安として表示に使う。
+const DECK_SUPPLY = { balsa: { count: 8, lengthM: 0.6 }, agatis: { count: 2, lengthM: 0.6 } };
+
 const G = 9.81;
 
 /* ============================================================
@@ -406,6 +416,251 @@ const cableOnlyMats = ["kiteString", "wire30", "bamboo"];
 const cableOnlyGroups = ["cables", "mainCable", "hangers", "ribbonCable"];
 const allMats = ["hinoki10", "hinoki5", "bamboo", "kiteString", "wire30"];
 
+/* ============================================================
+   1構成（ジオメトリ＋材料選択）を評価する純粋関数。
+   通常のUI表示だけでなく、下の候補探索（総当たり）からも同じロジックで
+   繰り返し呼ばれる。structureCountは主構造の枚数（1枚か2枚か）、
+   deckOptsは走行面デッキ材の重量加算設定。
+   ============================================================ */
+function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts) {
+  const membersWithProps = geom.members.map((m) => {
+    const mat = MATERIALS[matSel[m.group]];
+    const bundle = bundleSel[m.group] || 1;
+    const { A, I } = sectionProps(mat, bundle);
+    return { ...m, E: mat.E, A, I, mat, bundle };
+  });
+
+  // 自重（節点集中荷重として下向きに配分）／材料別の使用長さ（支給量チェック用）
+  const ndof = geom.nodes.length * 2;
+  const loads = new Array(ndof).fill(0);
+  let totalWeightKg = 0;
+  const lengthByMaterialM = {};
+  membersWithProps.forEach((m) => {
+    const p1 = geom.nodes[m.n1];
+    const p2 = geom.nodes[m.n2];
+    const L = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const wKg = L * m.A * m.mat.density;
+    totalWeightKg += wKg;
+    const half = (-wKg * G) / 2;
+    loads[2 * m.n1 + 1] += half;
+    loads[2 * m.n2 + 1] += half;
+    const matKey = matSel[m.group];
+    lengthByMaterialM[matKey] = (lengthByMaterialM[matKey] || 0) + L * m.bundle;
+  });
+  // 実物は主構造をstructureCount枚並べるため、使用量もその倍率で換算（対傾構・床板分は含まないため下限の目安）
+  Object.keys(lengthByMaterialM).forEach((k) => { lengthByMaterialM[k] *= structureCount; });
+  const P = (D.loadKg / structureCount) * G;
+  loads[2 * geom.loadNode + 1] += -P;
+
+  // 固定自由度：支承（左x,y／右y）＋ 吊橋の場合は外部アンカー(x,y)も完全固定
+  const fixedDofs = [2 * geom.supports.left, 2 * geom.supports.left + 1, 2 * geom.supports.right + 1];
+  if (geom.anchors) geom.anchors.forEach((a) => fixedDofs.push(2 * a, 2 * a + 1));
+
+  const solved = solveTruss(geom.nodes, membersWithProps, loads, fixedDofs);
+
+  const deflectionMM = Math.abs(solved.U[2 * geom.loadNode + 1]) * 1000;
+
+  // 安全率 = 部材が壊れる耐力 ÷ 実際に生じている力（大きいほど余裕がある。1.0未満で破壊）
+  const memberChecks = membersWithProps.map((m, i) => {
+    const N = solved.forces[i];
+    const p1 = geom.nodes[m.n1];
+    const p2 = geom.nodes[m.n2];
+    const L = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    let safetyFactor = Infinity;
+    let status = "ok";
+    const NOISE = 0.05; // N未満の力は実質ゼロとみなす（数値誤差対策）
+    if (N >= -NOISE) {
+      // 引張（またはほぼゼロ）
+      const cap = m.mat.tensileIsForce ? m.mat.tensile * m.bundle : m.mat.tensile * m.A;
+      safetyFactor = N > NOISE ? cap / N : Infinity;
+    } else {
+      // 圧縮
+      if (m.mat.tensionOnly) {
+        safetyFactor = 0; // 引張専用材に圧縮力→即アウト
+        status = "invalid";
+      } else {
+        const Pcr = (Math.PI * Math.PI * m.E * m.I) / (L * L);
+        const crushCap = m.mat.compressive * m.A;
+        const cap = Math.min(Pcr, crushCap);
+        safetyFactor = Math.abs(N) > 1e-9 ? cap / Math.abs(N) : Infinity;
+      }
+    }
+    if (status !== "invalid") status = safetyFactor < 1 ? "fail" : safetyFactor < 1.3 ? "warn" : "ok";
+    return { ...m, N, L, safetyFactor, status };
+  });
+
+  const minSafetyFactor = memberChecks.reduce((acc, m) => Math.min(acc, m.safetyFactor), Infinity);
+  const horizontalThrust = Math.abs(solved.reactionAt(2 * geom.supports.left));
+  const selfAnchorRatio = horizontalThrust / P;
+  const anchorReactions = geom.anchors
+    ? geom.anchors.map((a) => Math.hypot(solved.reactionAt(2 * a), solved.reactionAt(2 * a + 1)))
+    : null;
+
+  const deckMat = deckOpts && deckOpts.enabled ? DECK_MATERIALS[deckOpts.mat] : null;
+  const deckWeightKg = deckMat ? D.span * (deckOpts.widthMM / 1000) * deckMat.thicknessM * deckMat.density : 0;
+  const totalModelWeightKg = totalWeightKg * structureCount + deckWeightKg;
+
+  const deflPass = deflectionMM <= D.deflectionLimit;
+  const strengthPass = minSafetyFactor >= 1;
+  const anchorPass = selfAnchorRatio < 0.03;
+  const overallPass = deflPass && strengthPass && anchorPass;
+
+  return {
+    membersWithProps: memberChecks,
+    totalWeightKg,
+    deckWeightKg,
+    totalModelWeightKg,
+    deflectionMM,
+    minSafetyFactor,
+    horizontalThrust,
+    selfAnchorRatio,
+    anchorReactions,
+    lengthByMaterialM,
+    deflPass,
+    strengthPass,
+    anchorPass,
+    overallPass,
+    U: solved.U,
+    loadNode: geom.loadNode,
+  };
+}
+
+/* ============================================================
+   候補探索（総当たり）
+   構造タイプごとに「形状パラメータの候補値」と「材料・束ね本数の候補値」を
+   小さめのグリッドで定義し、直積（cartesian）を取って全通り評価する。
+   ジオメトリはstructType固有のbuild*関数で作るので、buildGeomに委譲する。
+   ============================================================ */
+function cartesian(paramLists) {
+  const keys = Object.keys(paramLists);
+  let combos = [{}];
+  for (const key of keys) {
+    const next = [];
+    for (const partial of combos) {
+      for (const val of paramLists[key]) next.push({ ...partial, [key]: val });
+    }
+    combos = next;
+  }
+  return combos;
+}
+
+const SEARCH_CONFIGS = {
+  truss: {
+    shapeGrid: { panels: [4, 6, 8, 10, 12], depthMM: [60, 80, 100, 120, 150, 180, 220, 260] },
+    buildGeom: (span, p) => cleanGeom(buildTrussGirder(span, p.depthMM / 1000, p.panels)),
+    matGrid: {
+      chordMat: ["hinoki10", "hinoki5"], chordBundle: [1, 2, 3],
+      braceMat: ["hinoki5", "bamboo"], braceBundle: [1, 2],
+    },
+    toSelections: (p) => ({
+      matSel: { bottomChord: p.chordMat, topChord: p.chordMat, verticals: p.braceMat, diagonals: p.braceMat },
+      bundleSel: { bottomChord: p.chordBundle, topChord: p.chordBundle, verticals: p.braceBundle, diagonals: p.braceBundle },
+    }),
+    stateFields: (p) => ({ panels: p.panels, depthMM: p.depthMM }),
+    summary: (p) => `パネル${p.panels}／桁高${p.depthMM}mm`,
+  },
+  bowstring: {
+    shapeGrid: { panels: [4, 6, 8, 10, 12], depthMM: [40, 60, 80, 100, 130, 160, 200], springHeightMM: [10, 20, 30, 50] },
+    buildGeom: (span, p) => cleanGeom(buildBowstring(span, p.depthMM / 1000, p.panels, p.springHeightMM / 1000)),
+    matGrid: {
+      chordMat: ["hinoki10", "hinoki5"], chordBundle: [1, 2, 3],
+      braceMat: ["hinoki5", "bamboo"], braceBundle: [1, 2],
+    },
+    toSelections: (p) => ({
+      matSel: { bottomChord: p.chordMat, topChord: p.chordMat, verticals: p.braceMat, diagonals: p.braceMat },
+      bundleSel: { bottomChord: p.chordBundle, topChord: p.chordBundle, verticals: p.braceBundle, diagonals: p.braceBundle },
+    }),
+    stateFields: (p) => ({ panels: p.panels, depthMM: p.depthMM, springHeightMM: p.springHeightMM }),
+    summary: (p) => `パネル${p.panels}／ライズ${p.depthMM}mm／端${p.springHeightMM}mm`,
+  },
+  stressribbon: {
+    shapeGrid: { panels: [4, 6, 8, 10], sagMM: [40, 80, 120, 160], endOffsetMM: [15, 25] },
+    buildGeom: (span, p) => cleanGeom(buildStressRibbon(span, p.sagMM / 1000, p.panels, p.endOffsetMM / 1000)),
+    matGrid: {
+      chordMat: ["hinoki10", "hinoki5"], chordBundle: [1, 2],
+      cableMat: ["kiteString", "wire30"], cableBundle: [1, 2, 3, 4, 6],
+      strutMat: ["hinoki5", "bamboo"], strutBundle: [1, 2],
+    },
+    toSelections: (p) => ({
+      matSel: { bottomChord: p.chordMat, ribbonCable: p.cableMat, verticals: p.strutMat, diagonals: p.strutMat },
+      bundleSel: { bottomChord: p.chordBundle, ribbonCable: p.cableBundle, verticals: p.strutBundle, diagonals: p.strutBundle },
+    }),
+    stateFields: (p) => ({ panels: p.panels, sagMM: p.sagMM, endOffsetMM: p.endOffsetMM }),
+    summary: (p) => `パネル${p.panels}／垂れ${p.sagMM}mm／端${p.endOffsetMM}mm`,
+  },
+  cablestayed: {
+    shapeGrid: {
+      panels: [6, 8], depthMM: [100, 150], towerHeightMM: [150, 250], towerRatio: [0, 1],
+      cableCount: [2, 3], cableSpread: [0, 1],
+    },
+    buildGeom: (span, p) => {
+      const pairs = [[0.2, 0.9], [0.3, 0.95]];
+      const [s, e] = pairs[p.cableSpread];
+      return cleanGeom(buildCableStayed(span, p.depthMM / 1000, p.panels, p.towerHeightMM / 1000, p.towerRatio, p.cableCount, s, e));
+    },
+    matGrid: {
+      chordMat: ["hinoki10", "hinoki5"], chordBundle: [1, 2],
+      towerBundle: [1, 2],
+      cableMat: ["kiteString", "wire30"], cableBundle: [1, 2, 3, 4],
+    },
+    toSelections: (p) => ({
+      matSel: { bottomChord: p.chordMat, topChord: p.chordMat, verticals: "hinoki5", diagonals: "hinoki5", tower: "hinoki10", cables: p.cableMat },
+      bundleSel: { bottomChord: p.chordBundle, topChord: p.chordBundle, verticals: 1, diagonals: 1, tower: p.towerBundle, cables: p.cableBundle },
+    }),
+    stateFields: (p) => {
+      const pairs = [[0.2, 0.9], [0.3, 0.95]];
+      const [s, e] = pairs[p.cableSpread];
+      return { panels: p.panels, depthMM: p.depthMM, towerHeightMM: p.towerHeightMM, towerRatio: p.towerRatio, cableCount: p.cableCount, cableStartRatio: s, cableEndRatio: e };
+    },
+    summary: (p) => `パネル${p.panels}／桁高${p.depthMM}mm／塔${p.towerHeightMM}mm／塔位置${p.towerRatio}／ケーブル${p.cableCount}本`,
+  },
+  suspension: {
+    shapeGrid: {
+      panels: [6, 8], towerHeightMM: [150, 250], towerInsetRatio: [0.1, 0.2], cableSagMM: [100, 200],
+    },
+    buildGeom: (span, p) => cleanGeom(buildSuspension(span, 0.08, p.panels, p.towerInsetRatio, p.towerHeightMM / 1000, p.cableSagMM, 300, 40)),
+    matGrid: {
+      chordMat: ["hinoki10", "hinoki5"], chordBundle: [1, 2],
+      mainCableMat: ["kiteString", "wire30"], mainCableBundle: [1, 2, 3, 4],
+    },
+    toSelections: (p) => ({
+      matSel: { bottomChord: p.chordMat, topChord: p.chordMat, verticals: "hinoki5", diagonals: "hinoki5", tower: "hinoki10", mainCable: p.mainCableMat, hangers: "kiteString" },
+      bundleSel: { bottomChord: p.chordBundle, topChord: p.chordBundle, verticals: 1, diagonals: 1, tower: 2, mainCable: p.mainCableBundle, hangers: 1 },
+    }),
+    stateFields: (p) => ({ panels: p.panels, towerHeightMM: p.towerHeightMM, towerInsetRatio: p.towerInsetRatio, cableSagMM: p.cableSagMM, anchorOffsetMM: 300, anchorHeightMM: 40 }),
+    summary: (p) => `パネル${p.panels}／塔${p.towerHeightMM}mm／塔位置比${p.towerInsetRatio}／たるみ${p.cableSagMM}mm`,
+  },
+};
+
+function searchCandidates(structType, D, structureCount, deckOpts, targetSF) {
+  const cfg = SEARCH_CONFIGS[structType];
+  const shapeCombos = cartesian(cfg.shapeGrid);
+  const matCombos = cartesian(cfg.matGrid);
+  const results = [];
+  let evaluated = 0;
+  for (const shape of shapeCombos) {
+    const geom = cfg.buildGeom(D.span, shape);
+    for (const matCombo of matCombos) {
+      evaluated++;
+      const { matSel, bundleSel } = cfg.toSelections(matCombo);
+      const r = computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts);
+      if (r.deflPass && r.anchorPass && r.minSafetyFactor >= targetSF) {
+        results.push({
+          shape, matCombo,
+          stateFields: cfg.stateFields(shape),
+          matSel, bundleSel,
+          summary: cfg.summary(shape),
+          totalModelWeightKg: r.totalModelWeightKg,
+          deflectionMM: r.deflectionMM,
+          minSafetyFactor: r.minSafetyFactor,
+        });
+      }
+    }
+  }
+  results.sort((a, b) => a.totalModelWeightKg - b.totalModelWeightKg);
+  return { evaluated, feasible: results.length, top: results.slice(0, 10) };
+}
+
 function BridgeSimulator() {
   const D = DEPARTMENT;
   const [structType, setStructType] = useState("truss");
@@ -467,93 +722,48 @@ function BridgeSimulator() {
     anchorOffsetMM, anchorHeightMM, D.span,
   ]);
 
-  const result = useMemo(() => {
-    const membersWithProps = geom.members.map((m) => {
-      const mat = MATERIALS[matSel[m.group]];
-      const bundle = bundleSel[m.group] || 1;
-      const { A, I } = sectionProps(mat, bundle);
-      return { ...m, E: mat.E, A, I, mat, bundle };
-    });
+  const [deckEnabled, setDeckEnabled] = useState(true);
+  const [deckMat, setDeckMat] = useState("balsa");
+  const [deckWidthMM, setDeckWidthMM] = useState(80);
+  const deckOpts = useMemo(() => ({ enabled: deckEnabled, mat: deckMat, widthMM: deckWidthMM }), [deckEnabled, deckMat, deckWidthMM]);
 
-    // 自重（節点集中荷重として下向きに配分）／材料別の使用長さ（支給量チェック用）
-    const ndof = geom.nodes.length * 2;
-    const loads = new Array(ndof).fill(0);
-    let totalWeightKg = 0;
-    const lengthByMaterialM = {};
-    membersWithProps.forEach((m) => {
-      const p1 = geom.nodes[m.n1];
-      const p2 = geom.nodes[m.n2];
-      const L = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-      const wKg = L * m.A * m.mat.density;
-      totalWeightKg += wKg;
-      const half = (-wKg * G) / 2;
-      loads[2 * m.n1 + 1] += half;
-      loads[2 * m.n2 + 1] += half;
-      const matKey = matSel[m.group];
-      lengthByMaterialM[matKey] = (lengthByMaterialM[matKey] || 0) + L * m.bundle;
-    });
-    // 実物は主構造をstructureCount枚並べるため、使用量もその倍率で換算（対傾構・床板分は含まないため下限の目安）
-    Object.keys(lengthByMaterialM).forEach((k) => { lengthByMaterialM[k] *= structureCount; });
-    const P = (D.loadKg / structureCount) * G;
-    loads[2 * geom.loadNode + 1] += -P;
+  const [targetSF, setTargetSF] = useState(1.5);
+  const [searching, setSearching] = useState(false);
+  const [searchOutcome, setSearchOutcome] = useState(null); // { evaluated, feasible, top, forType }
 
-    // 固定自由度：支承（左x,y／右y）＋ 吊橋の場合は外部アンカー(x,y)も完全固定
-    const fixedDofs = [2 * geom.supports.left, 2 * geom.supports.left + 1, 2 * geom.supports.right + 1];
-    if (geom.anchors) geom.anchors.forEach((a) => fixedDofs.push(2 * a, 2 * a + 1));
+  const result = useMemo(
+    () => computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts),
+    [geom, matSel, bundleSel, D, structureCount, deckOpts]
+  );
 
-    const solved = solveTruss(geom.nodes, membersWithProps, loads, fixedDofs);
+  const runSearch = () => {
+    setSearching(true);
+    setTimeout(() => {
+      const outcome = searchCandidates(structType, D, structureCount, deckOpts, targetSF);
+      setSearchOutcome({ ...outcome, forType: structType });
+      setSearching(false);
+    }, 0);
+  };
 
-    const deflectionMM = Math.abs(solved.U[2 * geom.loadNode + 1]) * 1000;
-
-    // 安全率 = 部材が壊れる耐力 ÷ 実際に生じている力（大きいほど余裕がある。1.0未満で破壊）
-    const memberChecks = membersWithProps.map((m, i) => {
-      const N = solved.forces[i];
-      const p1 = geom.nodes[m.n1];
-      const p2 = geom.nodes[m.n2];
-      const L = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-      let safetyFactor = Infinity;
-      let status = "ok";
-      const NOISE = 0.05; // N未満の力は実質ゼロとみなす（数値誤差対策）
-      if (N >= -NOISE) {
-        // 引張（またはほぼゼロ）
-        const cap = m.mat.tensileIsForce ? m.mat.tensile * m.bundle : m.mat.tensile * m.A;
-        safetyFactor = N > NOISE ? cap / N : Infinity;
-      } else {
-        // 圧縮
-        if (m.mat.tensionOnly) {
-          safetyFactor = 0; // 引張専用材に圧縮力→即アウト
-          status = "invalid";
-        } else {
-          const Pcr = (Math.PI * Math.PI * m.E * m.I) / (L * L);
-          const crushCap = m.mat.compressive * m.A;
-          const cap = Math.min(Pcr, crushCap);
-          safetyFactor = Math.abs(N) > 1e-9 ? cap / Math.abs(N) : Infinity;
-        }
-      }
-      if (status !== "invalid") status = safetyFactor < 1 ? "fail" : safetyFactor < 1.3 ? "warn" : "ok";
-      return { ...m, N, L, safetyFactor, status };
-    });
-
-    const minSafetyFactor = memberChecks.reduce((acc, m) => Math.min(acc, m.safetyFactor), Infinity);
-    const horizontalThrust = Math.abs(solved.reactionAt(2 * geom.supports.left));
-    const selfAnchorRatio = horizontalThrust / P;
-    const anchorReactions = geom.anchors
-      ? geom.anchors.map((a) => Math.hypot(solved.reactionAt(2 * a), solved.reactionAt(2 * a + 1)))
-      : null;
-
-    return {
-      membersWithProps: memberChecks,
-      totalWeightKg,
-      deflectionMM,
-      minSafetyFactor,
-      horizontalThrust,
-      selfAnchorRatio,
-      anchorReactions,
-      lengthByMaterialM,
-      U: solved.U,
-      loadNode: geom.loadNode,
-    };
-  }, [geom, matSel, bundleSel, D.loadKg, structureCount]);
+  const applyCandidate = (cand) => {
+    const f = cand.stateFields;
+    if ("panels" in f) setPanels(f.panels);
+    if ("depthMM" in f) setDepthMM(f.depthMM);
+    if ("springHeightMM" in f) setSpringHeightMM(f.springHeightMM);
+    if ("sagMM" in f) setSagMM(f.sagMM);
+    if ("endOffsetMM" in f) setEndOffsetMM(f.endOffsetMM);
+    if ("towerHeightMM" in f) setTowerHeightMM(f.towerHeightMM);
+    if ("towerRatio" in f) setTowerRatio(f.towerRatio);
+    if ("cableCount" in f) setCableCount(f.cableCount);
+    if ("cableStartRatio" in f) setCableStartRatio(f.cableStartRatio);
+    if ("cableEndRatio" in f) setCableEndRatio(f.cableEndRatio);
+    if ("towerInsetRatio" in f) setTowerInsetRatio(f.towerInsetRatio);
+    if ("cableSagMM" in f) setCableSagMM(f.cableSagMM);
+    if ("anchorOffsetMM" in f) setAnchorOffsetMM(f.anchorOffsetMM);
+    if ("anchorHeightMM" in f) setAnchorHeightMM(f.anchorHeightMM);
+    setMatSel((prev) => ({ ...prev, ...cand.matSel }));
+    setBundleSel((prev) => ({ ...prev, ...cand.bundleSel }));
+  };
 
   // --- SVG 描画用スケール ---
   const svgW = 640, svgH = 320, margin = 40;
@@ -575,9 +785,7 @@ function BridgeSimulator() {
     return m.N >= 0 ? "#2563eb" : "#334155";
   };
 
-  const deflPass = result.deflectionMM <= D.deflectionLimit;
-  const strengthPass = result.minSafetyFactor >= 1;
-  const anchorPass = result.selfAnchorRatio < 0.03;
+  const { deflPass, strengthPass, anchorPass, overallPass } = result;
 
   const groups = STRUCT_TYPES[structType].groups;
 
@@ -628,11 +836,106 @@ function BridgeSimulator() {
           </div>
           {structureCount === 2 && (
             <p style={{ fontSize: 11, color: "#8a6d3b", marginTop: 8 }}>
-              ※ 表示される重量はこの1枚分です。実際の模型全体の重量は主構造2枚＋横つなぎ材＋床板の分だけこれより重くなります。
+              ※ 主構造の重量はこの1枚分の値です。下の「模型総重量」には主構造{structureCount}枚分＋デッキ材の概算を合算しています。
               また幅方向の座屈・転倒を防ぐため、上弦材どうしを結ぶ水平方向のブレース（対傾構）を必ず入れてください（このツールでは検証できません）。
             </p>
           )}
         </div>
+
+        {/* 走行面デッキ材 */}
+        <div style={{ ...panelStyle, marginBottom: 20, background: "#f6f2e6" }}>
+          <SectionTitle>走行面デッキ材（板）</SectionTitle>
+          <p style={{ fontSize: 12, color: "#5b6270", lineHeight: 1.7, margin: "0 0 10px" }}>
+            支給材にはバルサ板・アガチス板もありますが、これらは道路面幅80mm以上を確保する走行面の板として使うもので、
+            軸力トラス部材ではないためこのツールの構造計算（安全率・たわみ）には含まれません。ただし総重量（経済性）には
+            効いてくるため、下弦材の上に敷く板1枚分の重量だけ概算で加算できます。曲げ剛性の検証は別途必要です。
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button onClick={() => setDeckEnabled(!deckEnabled)} style={tabStyle(deckEnabled, "#8a6d3b")}>
+              {deckEnabled ? "デッキ重量を加算する" : "デッキ重量を加算しない"}
+            </button>
+            {deckEnabled && (
+              <>
+                <select value={deckMat} onChange={(e) => setDeckMat(e.target.value)} style={{ ...selectStyle, width: 220 }}>
+                  {Object.entries(DECK_MATERIALS).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
+                </select>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5b6270" }}>
+                  幅
+                  <input type="number" value={deckWidthMM} min={80} max={200} step={5}
+                    onChange={(e) => setDeckWidthMM(Math.max(80, Number(e.target.value)))}
+                    style={{ width: 70, fontSize: 13, padding: "4px 6px", borderRadius: 5, border: "1px solid #d8d2c0" }} />
+                  mm（規定は80mm以上）
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* 候補探索 */}
+        <div style={{ ...panelStyle, marginBottom: 20, background: "#eef6ee", borderColor: "#bcd8c1" }}>
+          <SectionTitle>🏆 勝てる構成を探す（{STRUCT_TYPES[structType].label}）</SectionTitle>
+          <p style={{ fontSize: 12, color: "#5b6270", lineHeight: 1.7, margin: "0 0 10px" }}>
+            パネル数・形状・材料・束ね本数の組み合わせを内部で総当たり評価し、<b>たわみ50mm以内・支承水平反力OK・
+            最小安全率が目標値以上</b>の構成だけを、模型総重量（主構造{structureCount}枚＋デッキ概算）が軽い順に並べます。
+            条件を満たさない構成はそもそも候補に出しません。見つかった候補は下の一覧から「この構成を適用」でそのまま読み込めます。
+          </p>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5b6270" }}>
+              目標安全率
+              <input type="number" value={targetSF} min={1} max={3} step={0.1}
+                onChange={(e) => setTargetSF(Math.max(1, Number(e.target.value)))}
+                style={{ width: 60, fontSize: 13, padding: "4px 6px", borderRadius: 5, border: "1px solid #d8d2c0" }} />
+              以上（実物のばらつきを見込むなら1.5〜2.0推奨）
+            </div>
+            <button onClick={runSearch} disabled={searching}
+              style={{ ...tabStyle(true, "#2f6845"), opacity: searching ? 0.6 : 1, cursor: searching ? "wait" : "pointer" }}>
+              {searching ? "探索中…" : "探索する"}
+            </button>
+          </div>
+
+          {searchOutcome && searchOutcome.forType === structType && (
+            <div style={{ marginTop: 14 }}>
+              <p style={{ fontSize: 12, color: "#2f6845", marginBottom: 8 }}>
+                {searchOutcome.evaluated.toLocaleString()}通りを評価し、{searchOutcome.feasible}件が条件を満たしました
+                {searchOutcome.feasible > 0 ? `（上位${searchOutcome.top.length}件を表示）` : "。目標安全率を下げるか、束ね本数の幅を広げてみてください。"}
+              </p>
+              {searchOutcome.top.length > 0 && (
+                <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "#5b6270" }}>
+                      <th style={thStyle}>#</th><th style={thStyle}>形状</th><th style={thStyle}>模型総重量</th>
+                      <th style={thStyle}>たわみ</th><th style={thStyle}>最小安全率</th><th style={thStyle}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {searchOutcome.top.map((cand, i) => (
+                      <tr key={i} style={{ borderTop: "1px solid #d5e8d8" }}>
+                        <td style={tdStyle}>{i + 1}</td>
+                        <td style={tdStyle}>{cand.summary}</td>
+                        <td style={{ ...tdStyle, fontWeight: 700 }}>{(cand.totalModelWeightKg * 1000).toFixed(0)} g</td>
+                        <td style={tdStyle}>{cand.deflectionMM.toFixed(1)} mm</td>
+                        <td style={tdStyle}>{cand.minSafetyFactor.toFixed(2)}</td>
+                        <td style={tdStyle}>
+                          <button onClick={() => applyCandidate(cand)} style={{ ...tabStyle(false, "#2f6845"), padding: "4px 10px", fontSize: 11 }}>
+                            この構成を適用
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+
+        {!overallPass && (
+          <div style={{ ...warnBoxStyle, background: "#fdecec", borderColor: "#e6a3a3", color: "#7a1f1f", fontSize: 13, fontWeight: 700, marginBottom: 20 }}>
+            ❌ 現在の手動設定はコンテストの条件を満たしていません（最小安全率 {result.minSafetyFactor === Infinity ? "—" : result.minSafetyFactor.toFixed(2)} ／
+            たわみ {result.deflectionMM.toFixed(1)}mm ／ 支承水平反力 {(result.selfAnchorRatio * 100).toFixed(1)}%）。
+            上の「勝てる構成を探す」で条件を満たす候補を探すか、下のパラメータ・材料を調整してください。
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
           {/* 左：パラメータ */}
@@ -777,12 +1080,16 @@ function BridgeSimulator() {
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
-              <ResultCard label="模型重量（自重・概算）" value={`${(result.totalWeightKg * 1000).toFixed(0)} g`}
-                sub={`支給材全量(概算${SUPPLY_TOTAL_G}g)の${((result.totalWeightKg * 1000 / SUPPLY_TOTAL_G) * 100).toFixed(0)}%`} ok={true} />
+              <ResultCard label={`模型総重量（主構造${structureCount}枚＋デッキ概算）`} value={`${(result.totalModelWeightKg * 1000).toFixed(0)} g`}
+                sub={`支給材全量(概算${SUPPLY_TOTAL_G}g)の${((result.totalModelWeightKg * 1000 / SUPPLY_TOTAL_G) * 100).toFixed(0)}% ／ 経済性スコアの基準値`} ok={overallPass} />
               <ResultCard label="中央たわみ" value={`${result.deflectionMM.toFixed(1)} mm`} sub={`規定 ${D.deflectionLimit}mm 以内`} ok={deflPass} />
               <ResultCard label="最小安全率" value={result.minSafetyFactor === Infinity ? "—" : `${result.minSafetyFactor.toFixed(2)}`}
                 sub="1.00未満で破壊。2.0前後を目標に" ok={strengthPass} />
               <ResultCard label="支承の水平反力" value={`${(result.selfAnchorRatio * 100).toFixed(1)}%`} sub="支承は水平力非負担。0%に近いほど安全" ok={anchorPass} />
+              <ResultCard label="主構造重量（自重・1枚分）" value={`${(result.totalWeightKg * 1000).toFixed(0)} g`}
+                sub={`主構造${structureCount}枚で ${(result.totalWeightKg * structureCount * 1000).toFixed(0)} g`} ok={true} />
+              <ResultCard label="デッキ材重量（概算・追加分）" value={`${(result.deckWeightKg * 1000).toFixed(0)} g`}
+                sub={deckEnabled ? `${DECK_MATERIALS[deckMat].label}／幅${deckWidthMM}mm` : "未加算（下の設定でON）"} ok={true} />
               {result.anchorReactions && (
                 <>
                   <ResultCard label="左アンカー反力（治具負担分）" value={`${result.anchorReactions[0].toFixed(0)} N`} sub="事前に事務局へ要相談" ok={true} />
