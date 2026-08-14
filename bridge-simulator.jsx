@@ -115,7 +115,11 @@ function sectionProps(mat, bundle) {
    すべて「支間長 span[m] のトラス」として統一的に FEM で解く。
    下弦＝道路面（載荷点・支承点）、上弦＝アーチ／トラス上弦。
    ============================================================ */
-function buildTrussGirder(span, depth, panels) {
+function buildTrussGirder(span, depth, panels, diagonalMode = "alt") {
+  // diagonalMode: "alt"=1パネルおきに向きを交互（従来のワーレン型）
+  //   "uniform"=全パネルで向きを揃える。中央集中荷重の下では斜材が全部同じ符号の力
+  //   （このツールの荷重配置では引張）になりやすく、凧糸など軽い引張専用材に
+  //   置き換えて軽量化できる可能性がある（シミュレーションで確認して選ぶこと）。
   const nodes = [];
   const bottomIds = [];
   const topIds = [];
@@ -135,7 +139,8 @@ function buildTrussGirder(span, depth, panels) {
   for (let i = 0; i <= panels; i++)
     members.push({ n1: bottomIds[i], n2: topIds[i], group: "verticals" });
   for (let i = 0; i < panels; i++) {
-    if (i % 2 === 0) members.push({ n1: bottomIds[i], n2: topIds[i + 1], group: "diagonals" });
+    const goUp = diagonalMode === "uniform" ? i >= panels / 2 : i % 2 === 0;
+    if (goUp) members.push({ n1: bottomIds[i], n2: topIds[i + 1], group: "diagonals" });
     else members.push({ n1: topIds[i], n2: bottomIds[i + 1], group: "diagonals" });
   }
   return {
@@ -529,18 +534,22 @@ function cartesian(paramLists) {
 
 const SEARCH_CONFIGS = {
   truss: {
-    shapeGrid: { panels: [4, 6, 8, 10, 12], depthMM: [60, 80, 100, 120, 150, 180, 220, 260] },
-    buildGeom: (span, p) => cleanGeom(buildTrussGirder(span, p.depthMM / 1000, p.panels)),
+    shapeGrid: {
+      panels: [4, 6, 8, 10, 12], depthMM: [60, 80, 100, 120, 150, 180, 220, 260],
+      diagonalMode: ["alt", "uniform"],
+    },
+    buildGeom: (span, p) => cleanGeom(buildTrussGirder(span, p.depthMM / 1000, p.panels, p.diagonalMode)),
     matGrid: {
       chordMat: ["hinoki10", "hinoki5"], chordBundle: [1, 2, 3],
-      braceMat: ["hinoki5", "bamboo"], braceBundle: [1, 2],
+      vertMat: ["hinoki5", "bamboo"], vertBundle: [1, 2],
+      diagMat: ["hinoki5", "bamboo", "kiteString", "wire30"], diagBundle: [1, 2, 3, 4],
     },
     toSelections: (p) => ({
-      matSel: { bottomChord: p.chordMat, topChord: p.chordMat, verticals: p.braceMat, diagonals: p.braceMat },
-      bundleSel: { bottomChord: p.chordBundle, topChord: p.chordBundle, verticals: p.braceBundle, diagonals: p.braceBundle },
+      matSel: { bottomChord: p.chordMat, topChord: p.chordMat, verticals: p.vertMat, diagonals: p.diagMat },
+      bundleSel: { bottomChord: p.chordBundle, topChord: p.chordBundle, verticals: p.vertBundle, diagonals: p.diagBundle },
     }),
-    stateFields: (p) => ({ panels: p.panels, depthMM: p.depthMM }),
-    summary: (p) => `パネル${p.panels}／桁高${p.depthMM}mm`,
+    stateFields: (p) => ({ panels: p.panels, depthMM: p.depthMM, diagonalMode: p.diagonalMode }),
+    summary: (p) => `パネル${p.panels}／桁高${p.depthMM}mm／斜材${p.diagonalMode === "uniform" ? "片流れ" : "交互"}`,
   },
   bowstring: {
     shapeGrid: { panels: [4, 6, 8, 10, 12], depthMM: [40, 60, 80, 100, 130, 160, 200], springHeightMM: [10, 20, 30, 50] },
@@ -650,6 +659,7 @@ export default function BridgeSimulator() {
   const [structureCount, setStructureCount] = useState(1); // 1=単一主構造が全荷重負担 / 2=左右2主構造で荷重を折半
   const [panels, setPanels] = useState(6);
   const [depthMM, setDepthMM] = useState(120);
+  const [diagonalMode, setDiagonalMode] = useState("alt"); // トラス桁橋：斜材の向き（alt=交互／uniform=片流れ・引張専用材向き）
   const [springHeightMM, setSpringHeightMM] = useState(20); // ボウストリング：支間端のアーチ立ち上がり高さ
   const [sagMM, setSagMM] = useState(120); // 張弦梁：中央でのケーブル垂れ下がり量
   const [endOffsetMM, setEndOffsetMM] = useState(25); // 張弦梁：支間端でのケーブル位置（桁からの下方オフセット）
@@ -681,7 +691,7 @@ export default function BridgeSimulator() {
 
   const geom = useMemo(() => {
     const span = D.span;
-    if (structType === "truss") return cleanGeom(buildTrussGirder(span, depthMM / 1000, panels));
+    if (structType === "truss") return cleanGeom(buildTrussGirder(span, depthMM / 1000, panels, diagonalMode));
     if (structType === "bowstring")
       return cleanGeom(buildBowstring(span, depthMM / 1000, panels, springHeightMM / 1000));
     if (structType === "stressribbon")
@@ -700,7 +710,7 @@ export default function BridgeSimulator() {
       )
     );
   }, [
-    structType, panels, depthMM, springHeightMM, sagMM, endOffsetMM, towerHeightMM, towerRatio,
+    structType, panels, depthMM, diagonalMode, springHeightMM, sagMM, endOffsetMM, towerHeightMM, towerRatio,
     cableCount, cableStartRatio, cableEndRatio, towerInsetRatio, cableSagMM,
     anchorOffsetMM, anchorHeightMM, D.span,
   ]);
@@ -732,6 +742,7 @@ export default function BridgeSimulator() {
     const f = cand.stateFields;
     if ("panels" in f) setPanels(f.panels);
     if ("depthMM" in f) setDepthMM(f.depthMM);
+    if ("diagonalMode" in f) setDiagonalMode(f.diagonalMode);
     if ("springHeightMM" in f) setSpringHeightMM(f.springHeightMM);
     if ("sagMM" in f) setSagMM(f.sagMM);
     if ("endOffsetMM" in f) setEndOffsetMM(f.endOffsetMM);
@@ -933,6 +944,26 @@ export default function BridgeSimulator() {
             {structType === "bowstring" && (
               <NumberField label="アーチ立ち上がり高さ (mm)" value={springHeightMM}
                 onChange={(v) => setSpringHeightMM(Math.max(2, v))} min={2} max={100} step={2} />
+            )}
+            {structType === "truss" && (
+              <>
+                <div style={{ fontSize: 11, color: "#5b6270", marginBottom: 3 }}>斜材の向き</div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  <button onClick={() => setDiagonalMode("alt")} style={{ ...tabStyle(diagonalMode === "alt", "#8a6d3b"), flex: 1, padding: "6px 4px", fontSize: 11 }}>
+                    交互（ワーレン）
+                  </button>
+                  <button onClick={() => setDiagonalMode("uniform")} style={{ ...tabStyle(diagonalMode === "uniform", "#8a6d3b"), flex: 1, padding: "6px 4px", fontSize: 11 }}>
+                    片流れ
+                  </button>
+                </div>
+                {diagonalMode === "uniform" && (
+                  <p style={{ fontSize: 11, color: "#8a6d3b", lineHeight: 1.6, marginTop: -6 }}>
+                    ※ 斜材の向きを支間中央に向けて揃えると、この荷重条件では斜材が全部引張力になりやすく、
+                    凧糸・針金など軽い引張専用材に置き換えられる可能性があります（下の部材別チェックで斜材が
+                    全部「引張」になっているか確認してください。混在していたら安全率が最も低い部材が壊れます）。
+                  </p>
+                )}
+              </>
             )}
             {structType === "stressribbon" && (
               <>
