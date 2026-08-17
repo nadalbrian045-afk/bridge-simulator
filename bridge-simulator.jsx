@@ -410,7 +410,7 @@ const allMats = ["hinoki10", "hinoki5", "bamboo", "kiteString", "wire30"];
    繰り返し呼ばれる。structureCountは主構造の枚数（1枚か2枚か）、
    deckOptsは走行面デッキ材の重量加算設定。
    ============================================================ */
-function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts) {
+function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts, bracingOpts) {
   const membersWithProps = geom.members.map((m) => {
     const mat = MATERIALS[matSel[m.group]];
     const bundle = bundleSel[m.group] || 1;
@@ -435,7 +435,8 @@ function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts) {
     const matKey = matSel[m.group];
     lengthByMaterialM[matKey] = (lengthByMaterialM[matKey] || 0) + L * m.bundle;
   });
-  // 実物は主構造をstructureCount枚並べるため、使用量もその倍率で換算（対傾構・床板分は含まないため下限の目安）
+  // 実物は主構造をstructureCount枚並べるため、使用量もその倍率で換算
+  // （デッキ材・対傾構の使用量は別途この後で加算。接着代などは含まないため実際の必要量はやや多くなる）
   Object.keys(lengthByMaterialM).forEach((k) => { lengthByMaterialM[k] *= structureCount; });
   const P = (D.loadKg / structureCount) * G;
   loads[2 * geom.loadNode + 1] += -P;
@@ -486,7 +487,26 @@ function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts) {
 
   const deckMat = deckOpts && deckOpts.enabled ? DECK_MATERIALS[deckOpts.mat] : null;
   const deckWeightKg = deckMat ? D.span * (deckOpts.widthMM / 1000) * deckMat.thicknessM * deckMat.density : 0;
-  const totalModelWeightKg = totalWeightKg * structureCount + deckWeightKg;
+
+  // 対傾構（横方向ブレース）：主構造2枚を横につなぐ、幅方向の水平材。このFEMは1枚分の平面計算しか
+  // していないため強度には反映できないが、重量は「上弦を結ぶ水平材」＋「(任意)水平面の斜材」として概算できる。
+  // 主構造1枚のときは幅方向につなぐ相手がいないため常に0。
+  let bracingWeightKg = 0;
+  if (structureCount === 2 && bracingOpts && bracingOpts.enabled) {
+    const bracingMat = MATERIALS[bracingOpts.mat];
+    const { A } = sectionProps(bracingMat, bracingOpts.bundle);
+    const panelCount = Math.max(1, geom.members.filter((m) => m.group === "bottomChord").length);
+    const panelLenM = D.span / panelCount;
+    const widthM = bracingOpts.widthMM / 1000;
+    let lenM = (panelCount + 1) * widthM; // 上弦を結ぶ水平材（各パネル点に1本）
+    if (bracingOpts.pattern === "strutPlusDiag") {
+      lenM += panelCount * Math.hypot(widthM, panelLenM); // 水平面のジグザグ斜材
+    }
+    bracingWeightKg = lenM * A * bracingMat.density;
+    lengthByMaterialM[bracingOpts.mat] = (lengthByMaterialM[bracingOpts.mat] || 0) + lenM;
+  }
+
+  const totalModelWeightKg = totalWeightKg * structureCount + deckWeightKg + bracingWeightKg;
 
   const deflPass = deflectionMM <= D.deflectionLimit;
   const strengthPass = minSafetyFactor >= 1;
@@ -497,6 +517,7 @@ function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts) {
     membersWithProps: memberChecks,
     totalWeightKg,
     deckWeightKg,
+    bracingWeightKg,
     totalModelWeightKg,
     deflectionMM,
     minSafetyFactor,
@@ -624,7 +645,7 @@ const SEARCH_CONFIGS = {
   },
 };
 
-function searchCandidates(structType, D, structureCount, deckOpts, targetSF) {
+function searchCandidates(structType, D, structureCount, deckOpts, bracingOpts, targetSF) {
   const cfg = SEARCH_CONFIGS[structType];
   const shapeCombos = cartesian(cfg.shapeGrid);
   const matCombos = cartesian(cfg.matGrid);
@@ -635,7 +656,7 @@ function searchCandidates(structType, D, structureCount, deckOpts, targetSF) {
     for (const matCombo of matCombos) {
       evaluated++;
       const { matSel, bundleSel } = cfg.toSelections(matCombo);
-      const r = computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts);
+      const r = computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts, bracingOpts);
       if (r.deflPass && r.anchorPass && r.minSafetyFactor >= targetSF) {
         results.push({
           shape, matCombo,
@@ -720,19 +741,29 @@ export default function BridgeSimulator() {
   const [deckWidthMM, setDeckWidthMM] = useState(80);
   const deckOpts = useMemo(() => ({ enabled: deckEnabled, mat: deckMat, widthMM: deckWidthMM }), [deckEnabled, deckMat, deckWidthMM]);
 
+  const [bracingEnabled, setBracingEnabled] = useState(true);
+  const [bracingMat, setBracingMat] = useState("hinoki5");
+  const [bracingBundle, setBracingBundle] = useState(1);
+  const [bracingWidthMM, setBracingWidthMM] = useState(80);
+  const [bracingPattern, setBracingPattern] = useState("strutPlusDiag");
+  const bracingOpts = useMemo(
+    () => ({ enabled: bracingEnabled, mat: bracingMat, bundle: bracingBundle, widthMM: bracingWidthMM, pattern: bracingPattern }),
+    [bracingEnabled, bracingMat, bracingBundle, bracingWidthMM, bracingPattern]
+  );
+
   const [targetSF, setTargetSF] = useState(1.5);
   const [searching, setSearching] = useState(false);
   const [searchOutcome, setSearchOutcome] = useState(null); // { evaluated, feasible, top, forType }
 
   const result = useMemo(
-    () => computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts),
-    [geom, matSel, bundleSel, D, structureCount, deckOpts]
+    () => computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts, bracingOpts),
+    [geom, matSel, bundleSel, D, structureCount, deckOpts, bracingOpts]
   );
 
   const runSearch = () => {
     setSearching(true);
     setTimeout(() => {
-      const outcome = searchCandidates(structType, D, structureCount, deckOpts, targetSF);
+      const outcome = searchCandidates(structType, D, structureCount, deckOpts, bracingOpts, targetSF);
       setSearchOutcome({ ...outcome, forType: structType });
       setSearching(false);
     }, 0);
@@ -864,6 +895,46 @@ export default function BridgeSimulator() {
             )}
           </div>
         </div>
+
+        {/* 対傾構（横方向ブレース） */}
+        {structureCount === 2 && (
+          <div style={{ ...panelStyle, marginBottom: 20, background: "#f6f2e6" }}>
+            <SectionTitle>対傾構（横方向ブレース）</SectionTitle>
+            <p style={{ fontSize: 12, color: "#5b6270", lineHeight: 1.7, margin: "0 0 10px" }}>
+              主構造2枚を幅方向につなぐ水平材です。このツールは1枚分の平面計算しかしていないため、
+              対傾構が実際にどれだけ横倒れ・ねじれを防ぐかという強度計算はできません。ただし
+              「各パネル点で上弦材どうしを結ぶ水平材」＋「水平面のジグザグ斜材」という標準的な構成を
+              想定し、その分の重量だけは概算で加算できます。実際の配置・本数は設計図で必ず確認してください
+              （下の注意事項も参照）。
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button onClick={() => setBracingEnabled(!bracingEnabled)} style={tabStyle(bracingEnabled, "#8a6d3b")}>
+                {bracingEnabled ? "対傾構重量を加算する" : "対傾構重量を加算しない"}
+              </button>
+              {bracingEnabled && (
+                <>
+                  <select value={bracingMat} onChange={(e) => setBracingMat(e.target.value)} style={{ ...selectStyle, width: 180 }}>
+                    {allMats.map((mk) => <option key={mk} value={mk}>{MATERIALS[mk].label}</option>)}
+                  </select>
+                  <select value={bracingBundle} onChange={(e) => setBracingBundle(Number(e.target.value))} style={{ ...selectStyle, width: 90 }}>
+                    {[1, 2, 3].map((n) => <option key={n} value={n}>{n}本束ね</option>)}
+                  </select>
+                  <select value={bracingPattern} onChange={(e) => setBracingPattern(e.target.value)} style={{ ...selectStyle, width: 220 }}>
+                    <option value="strutOnly">水平材のみ（簡易）</option>
+                    <option value="strutPlusDiag">水平材＋斜材（推奨・X字ブレース相当）</option>
+                  </select>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5b6270" }}>
+                    幅
+                    <input type="number" value={bracingWidthMM} min={80} max={200} step={5}
+                      onChange={(e) => setBracingWidthMM(Math.max(80, Number(e.target.value)))}
+                      style={{ width: 70, fontSize: 13, padding: "4px 6px", borderRadius: 5, border: "1px solid #d8d2c0" }} />
+                    mm
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* 候補探索 */}
         <div style={{ ...panelStyle, marginBottom: 20, background: "#eef6ee", borderColor: "#bcd8c1" }}>
@@ -1094,7 +1165,7 @@ export default function BridgeSimulator() {
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
-              <ResultCard label={`模型総重量（主構造${structureCount}枚＋デッキ概算）`} value={`${(result.totalModelWeightKg * 1000).toFixed(0)} g`}
+              <ResultCard label={`模型総重量（主構造${structureCount}枚＋デッキ＋対傾構概算）`} value={`${(result.totalModelWeightKg * 1000).toFixed(0)} g`}
                 sub={`支給材全量(概算${SUPPLY_TOTAL_G}g)の${((result.totalModelWeightKg * 1000 / SUPPLY_TOTAL_G) * 100).toFixed(0)}% ／ 経済性スコアの基準値`} ok={overallPass} />
               <ResultCard label="中央たわみ" value={`${result.deflectionMM.toFixed(1)} mm`} sub={`規定 ${D.deflectionLimit}mm 以内`} ok={deflPass} />
               <ResultCard label="最小安全率" value={result.minSafetyFactor === Infinity ? "—" : `${result.minSafetyFactor.toFixed(2)}`}
@@ -1104,6 +1175,8 @@ export default function BridgeSimulator() {
                 sub={`主構造${structureCount}枚で ${(result.totalWeightKg * structureCount * 1000).toFixed(0)} g`} ok={true} />
               <ResultCard label="デッキ材重量（概算・追加分）" value={`${(result.deckWeightKg * 1000).toFixed(0)} g`}
                 sub={deckEnabled ? `${DECK_MATERIALS[deckMat].label}／幅${deckWidthMM}mm` : "未加算（下の設定でON）"} ok={true} />
+              <ResultCard label="対傾構重量（概算・追加分）" value={`${(result.bracingWeightKg * 1000).toFixed(0)} g`}
+                sub={structureCount === 2 ? (bracingEnabled ? `${MATERIALS[bracingMat].label}／幅${bracingWidthMM}mm` : "未加算（下の設定でON）") : "主構造1枚のため対象外"} ok={true} />
               {result.anchorReactions && (
                 <>
                   <ResultCard label="左アンカー反力（治具負担分）" value={`${result.anchorReactions[0].toFixed(0)} N`} sub="事前に事務局へ要相談" ok={true} />
