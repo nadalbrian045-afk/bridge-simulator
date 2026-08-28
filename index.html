@@ -520,7 +520,7 @@ function computeDesign(D, geom, matSel, bundleSel, structureCount, deckOpts, bra
       lenM += panelCount * Math.hypot(widthM, panelLenM); // 水平面のジグザグ斜材
     }
     bracingWeightKg = lenM * A * bracingMat.density;
-    lengthByMaterialM[bracingOpts.mat] = (lengthByMaterialM[bracingOpts.mat] || 0) + lenM;
+    lengthByMaterialM[bracingOpts.mat] = (lengthByMaterialM[bracingOpts.mat] || 0) + lenM * bracingOpts.bundle;
   }
 
   const totalModelWeightKg = totalWeightKg * structureCount + deckWeightKg + bracingWeightKg;
