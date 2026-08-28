@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>片流れトラス試作図</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+JP:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#eef1ec;
+    --paper:#ffffff;
+    --paper-tint:#f3f5f1;
+    --ink:#182626;
+    --ink-soft:#4d5f5e;
+    --ink-faint:#8b9a97;
+    --line:#c7d2cb;
+    --line-strong:#9fb0a9;
+    --accent:#c1440e;
+    --wood:#8a5a34;
+    --wood-fill:#e8dcc8;
+    --tension:#1f6f8b;
+    --tension-fill:#dbeef3;
+    --bamboo:#6f7d3c;
+    --good:#2f7d5c;
+    --good-bg:#e4f2ea;
+    --warn:#a6720f;
+    --warn-bg:#f6ecd8;
+    --focus:#1f6f8b;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#111c1f;
+      --paper:#16292c;
+      --paper-tint:#132224;
+      --ink:#eaf1ee;
+      --ink-soft:#a9bdb9;
+      --ink-faint:#6f8582;
+      --line:#2c4448;
+      --line-strong:#3d5b5c;
+      --accent:#ff9a5c;
+      --wood:#d9a56b;
+      --wood-fill:#3a2e1d;
+      --tension:#7fd0ec;
+      --tension-fill:#173842;
+      --bamboo:#b7c97a;
+      --good:#7fe0b3;
+      --good-bg:#173229;
+      --warn:#f0c169;
+      --warn-bg:#332a14;
+      --focus:#7fd0ec;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#111c1f;
+    --paper:#16292c;
+    --paper-tint:#132224;
+    --ink:#eaf1ee;
+    --ink-soft:#a9bdb9;
+    --ink-faint:#6f8582;
+    --line:#2c4448;
+    --line-strong:#3d5b5c;
+    --accent:#ff9a5c;
+    --wood:#d9a56b;
+    --wood-fill:#3a2e1d;
+    --tension:#7fd0ec;
+    --tension-fill:#173842;
+    --bamboo:#b7c97a;
+    --good:#7fe0b3;
+    --good-bg:#173229;
+    --warn:#f0c169;
+    --warn-bg:#332a14;
+    --focus:#7fd0ec;
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:"IBM Plex Sans JP","IBM Plex Sans",system-ui,sans-serif;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  .sheet{
+    max-width:920px;
+    margin:0 auto;
+    padding:28px 20px 80px;
+  }
+  .mono{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-variant-numeric:tabular-nums;
+  }
+
+  /* ---- title block ---- */
+  .titleblock{
+    background:var(--paper);
+    border:1px solid var(--line-strong);
+    border-radius:4px;
+    padding:18px 22px;
+    display:grid;
+    grid-template-columns:1fr auto;
+    gap:10px 24px;
+    margin-bottom:22px;
+  }
+  .titleblock h1{
+    grid-column:1/2;
+    margin:0 0 2px;
+    font-size:22px;
+    font-weight:700;
+    letter-spacing:0.01em;
+    text-wrap:balance;
+  }
+  .titleblock .subtitle{
+    grid-column:1/2;
+    color:var(--ink-soft);
+    font-size:13.5px;
+  }
+  .meta{
+    grid-column:2/3;
+    grid-row:1/3;
+    border-left:1px solid var(--line);
+    padding-left:20px;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11.5px;
+    color:var(--ink-soft);
+    display:grid;
+    grid-template-columns:auto auto;
+    gap:2px 10px;
+    align-content:center;
+  }
+  .meta dt{color:var(--ink-faint);}
+  .meta dd{margin:0; color:var(--ink);}
+
+  h2{
+    font-size:12px;
+    font-weight:700;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--ink-soft);
+    margin:0 0 12px;
+    padding-bottom:8px;
+    border-bottom:1px solid var(--line);
+  }
+  section{margin-bottom:30px;}
+  p{color:var(--ink-soft); font-size:14px;}
+  strong{color:var(--ink);}
+
+  figure{margin:0;}
+  .drawing-card{
+    background:var(--paper);
+    border:1px solid var(--line-strong);
+    border-radius:4px;
+    padding:14px 14px 4px;
+  }
+  figcaption{
+    font-size:12px;
+    color:var(--ink-soft);
+    padding:10px 4px 2px;
+    border-top:1px solid var(--line);
+    margin-top:8px;
+  }
+  svg{display:block; width:100%; height:auto; overflow:visible;}
+  svg text{fill:var(--ink); font-family:"IBM Plex Mono",monospace;}
+  .lbl-jp{font-family:"IBM Plex Sans JP","IBM Plex Sans",sans-serif;}
+  .dim-line{stroke:var(--ink-faint); stroke-width:1;}
+  .dim-text{fill:var(--ink-soft); font-size:12px;}
+  .node-dot{fill:var(--ink); }
+  .mbr-wood{stroke:var(--wood); stroke-width:4; stroke-linecap:round;}
+  .mbr-tension{stroke:var(--tension); stroke-width:2.5; stroke-linecap:round;}
+  .mbr-bamboo{stroke:var(--bamboo); stroke-width:2.5; stroke-linecap:round;}
+  .support-tri{fill:var(--ink-soft);}
+  .load-arrow{stroke:var(--accent); stroke-width:2.5; fill:none;}
+  .load-label{fill:var(--accent); font-weight:600; font-size:13px;}
+  .callout{fill:var(--ink); font-size:12.5px;}
+  .callout-hi{fill:var(--accent); font-weight:600; font-size:12.5px;}
+
+  /* legend */
+  .legend{display:flex; flex-wrap:wrap; gap:16px; padding:10px 4px 2px; font-size:12px; color:var(--ink-soft);}
+  .legend span{display:inline-flex; align-items:center; gap:6px;}
+  .swatch{width:18px; height:3px; border-radius:2px; display:inline-block;}
+
+  /* summary strip */
+  .stat-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:10px;
+  }
+  .stat{
+    background:var(--paper);
+    border:1px solid var(--line);
+    border-left:3px solid var(--good);
+    border-radius:4px;
+    padding:11px 13px;
+  }
+  .stat.warn{border-left-color:var(--warn);}
+  .stat .k{font-size:11px; color:var(--ink-faint); letter-spacing:0.03em;}
+  .stat .v{font-family:"IBM Plex Mono",monospace; font-size:19px; font-weight:600; margin-top:2px;}
+  .stat .s{font-size:11px; color:var(--ink-soft); margin-top:3px;}
+
+  /* BOM table */
+  .table-wrap{overflow-x:auto; border:1px solid var(--line-strong); border-radius:4px; background:var(--paper);}
+  table{width:100%; border-collapse:collapse; font-size:13px; min-width:640px;}
+  th,td{padding:9px 12px; text-align:left; border-bottom:1px solid var(--line);}
+  th{
+    font-size:11px; text-transform:uppercase; letter-spacing:0.06em;
+    color:var(--ink-faint); font-weight:600; background:var(--paper-tint);
+  }
+  td.num, th.num{font-family:"IBM Plex Mono",monospace; text-align:right; font-variant-numeric:tabular-nums;}
+  tbody tr:last-child td{border-bottom:none;}
+  tfoot td{font-weight:600; border-top:1px solid var(--line-strong); border-bottom:none; background:var(--paper-tint);}
+
+  .note-list{margin:0; padding-left:1.15em; font-size:14px; color:var(--ink-soft);}
+  .note-list li{margin-bottom:9px;}
+  .note-list li::marker{color:var(--ink-faint);}
+  .priority-tag{
+    display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px;
+    background:var(--warn-bg); color:var(--warn); padding:1px 7px; border-radius:3px;
+    margin-right:6px; font-weight:600;
+  }
+
+  footer{
+    margin-top:40px; padding-top:16px; border-top:1px solid var(--line);
+    font-size:11.5px; color:var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+
+<div class="sheet">
+
+  <div class="titleblock">
+    <h1>片流れトラス桁橋 試作図</h1>
+    <div class="subtitle">会場製作部門・試作プロトタイプ用 / 構造検討ツールの探索結果に基づく</div>
+    <dl class="meta">
+      <dt>支間</dt><dd>1000&nbsp;mm</dd>
+      <dt>パネル数</dt><dd>10（@100mm）</dd>
+      <dt>桁高</dt><dd>130&nbsp;mm</dd>
+      <dt>主構造</dt><dd>2枚並列</dd>
+      <dt>想定重量</dt><dd>122.0&nbsp;g</dd>
+      <dt>版</dt><dd>試作 v3</dd>
+    </dl>
+  </div>
+
+  <section>
+    <h2>安全性サマリー（シミュレータ検証値）</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="k">最小安全率</div>
+        <div class="v">1.93</div>
+        <div class="s">目標1.5以上・律速＝上弦材中央2区間</div>
+      </div>
+      <div class="stat">
+        <div class="k">中央たわみ</div>
+        <div class="v">10.2 mm</div>
+        <div class="s">規定50mm以内（余裕あり）</div>
+      </div>
+      <div class="stat">
+        <div class="k">模型総重量</div>
+        <div class="v">122.0 g</div>
+        <div class="s">主構造2枚+デッキ+対傾構（竹ひご2本束ね）</div>
+      </div>
+      <div class="stat">
+        <div class="k">支承水平反力</div>
+        <div class="v">0.0 %</div>
+        <div class="s">自碇式のため支承は鉛直力のみ</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>側面図（Elevation）— 主構造1枚分</h2>
+    <div class="drawing-card">
+      <figure>
+        <svg viewBox="0 0 1240 420" role="img" aria-label="片流れトラスの側面図。支間1000mm、桁高130mm、パネル数10。斜材は中央に向かって八の字にすべて引張方向に揃えてあり、木材の代わりに凧糸3本束ねを使う。上弦材の中央2区間が最も力を受ける弱点。">
+
+          <!-- load arrow -->
+          <line class="load-arrow" x1="630" y1="55" x2="630" y2="164" marker-end="url(#arrowhead)"></line>
+          <text class="load-label mono" x="642" y="72">載荷 25.4kg</text>
+          <text class="callout lbl-jp" x="642" y="88">（支間中央・路面上に1分間）</text>
+
+          <!-- bottom chord (deck) -->
+          <line class="mbr-wood" x1="130" y1="300" x2="1130" y2="300"></line>
+          <!-- top chord -->
+          <line class="mbr-wood" x1="130" y1="170" x2="1130" y2="170"></line>
+
+          <!-- verticals -->
+          <g class="mbr-wood">
+            <line x1="130" y1="170" x2="130" y2="300"></line>
+            <line x1="230" y1="170" x2="230" y2="300"></line>
+            <line x1="330" y1="170" x2="330" y2="300"></line>
+            <line x1="430" y1="170" x2="430" y2="300"></line>
+            <line x1="530" y1="170" x2="530" y2="300"></line>
+            <line x1="630" y1="170" x2="630" y2="300"></line>
+            <line x1="730" y1="170" x2="730" y2="300"></line>
+            <line x1="830" y1="170" x2="830" y2="300"></line>
+            <line x1="930" y1="170" x2="930" y2="300"></line>
+            <line x1="1030" y1="170" x2="1030" y2="300"></line>
+            <line x1="1130" y1="170" x2="1130" y2="300"></line>
+          </g>
+
+          <!-- diagonals: uniform / "片流れ", converge toward midspan-bottom -->
+          <g class="mbr-tension">
+            <line x1="130" y1="170" x2="230" y2="300"></line>
+            <line x1="230" y1="170" x2="330" y2="300"></line>
+            <line x1="330" y1="170" x2="430" y2="300"></line>
+            <line x1="430" y1="170" x2="530" y2="300"></line>
+            <line x1="530" y1="170" x2="630" y2="300"></line>
+            <line x1="630" y1="300" x2="730" y2="170"></line>
+            <line x1="730" y1="300" x2="830" y2="170"></line>
+            <line x1="830" y1="300" x2="930" y2="170"></line>
+            <line x1="930" y1="300" x2="1030" y2="170"></line>
+            <line x1="1030" y1="300" x2="1130" y2="170"></line>
+          </g>
+
+          <!-- node dots -->
+          <g class="node-dot">
+            <circle cx="130" cy="300" r="3.6"></circle><circle cx="230" cy="300" r="3.6"></circle>
+            <circle cx="330" cy="300" r="3.6"></circle><circle cx="430" cy="300" r="3.6"></circle>
+            <circle cx="530" cy="300" r="3.6"></circle><circle cx="630" cy="300" r="3.6"></circle>
+            <circle cx="730" cy="300" r="3.6"></circle><circle cx="830" cy="300" r="3.6"></circle>
+            <circle cx="930" cy="300" r="3.6"></circle><circle cx="1030" cy="300" r="3.6"></circle>
+            <circle cx="1130" cy="300" r="3.6"></circle>
+            <circle cx="130" cy="170" r="3.6"></circle><circle cx="230" cy="170" r="3.6"></circle>
+            <circle cx="330" cy="170" r="3.6"></circle><circle cx="430" cy="170" r="3.6"></circle>
+            <circle cx="530" cy="170" r="3.6"></circle><circle cx="630" cy="170" r="3.6"></circle>
+            <circle cx="730" cy="170" r="3.6"></circle><circle cx="830" cy="170" r="3.6"></circle>
+            <circle cx="930" cy="170" r="3.6"></circle><circle cx="1030" cy="170" r="3.6"></circle>
+            <circle cx="1130" cy="170" r="3.6"></circle>
+          </g>
+
+          <!-- supports -->
+          <polygon class="support-tri" points="130,300 118,324 142,324"></polygon>
+          <polygon class="support-tri" points="1130,300 1118,324 1142,324"></polygon>
+
+          <!-- weak-point callout -->
+          <line class="dim-line" x1="530" y1="170" x2="530" y2="130" stroke-dasharray="3 3"></line>
+          <line class="dim-line" x1="730" y1="170" x2="730" y2="130" stroke-dasharray="3 3"></line>
+          <text class="callout-hi mono" x="500" y="122" text-anchor="middle">SF 1.93 ← 最弱区間</text>
+
+          <!-- depth dimension (left) -->
+          <line class="dim-line" x1="90" y1="170" x2="90" y2="300"></line>
+          <line class="dim-line" x1="84" y1="170" x2="96" y2="170"></line>
+          <line class="dim-line" x1="84" y1="300" x2="96" y2="300"></line>
+          <text class="dim-text mono" x="80" y="238" text-anchor="end">桁高</text>
+          <text class="dim-text mono" x="80" y="253" text-anchor="end">130</text>
+
+          <!-- span dimension (bottom) -->
+          <line class="dim-line" x1="130" y1="360" x2="1130" y2="360"></line>
+          <line class="dim-line" x1="130" y1="354" x2="130" y2="366"></line>
+          <line class="dim-line" x1="1130" y1="354" x2="1130" y2="366"></line>
+          <text class="dim-text mono" x="630" y="380" text-anchor="middle">支間 1000mm</text>
+
+          <!-- panel dimension callout -->
+          <line class="dim-line" x1="130" y1="340" x2="230" y2="340"></line>
+          <line class="dim-line" x1="130" y1="335" x2="130" y2="345"></line>
+          <line class="dim-line" x1="230" y1="335" x2="230" y2="345"></line>
+          <text class="dim-text mono" x="180" y="332" text-anchor="middle">100</text>
+          <text class="callout lbl-jp" x="250" y="340">×10パネル</text>
+
+          <defs>
+            <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="4" refY="7" orient="auto">
+              <path d="M0,0 L8,0 L4,8 Z" fill="var(--accent)"></path>
+            </marker>
+          </defs>
+        </svg>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--wood)"></i>弦材・垂直材（ヒノキ角棒5×5mm・すべて1本）</span>
+          <span><i class="swatch" style="background:var(--tension)"></i>斜材（凧糸・純綿水糸・3本束ね／すべて引張）</span>
+        </div>
+        <figcaption>斜材はすべて中央下向きの「ハの字」に揃えた片流れ配置。この向きだとこの荷重条件では斜材が必ず引張力になるため木材ではなく凧糸に置き換えられる。上弦材の中央2区間（破線間）が構造全体の弱点（安全率1.93）。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>平面図（Plan）— 対傾構レベルとデッキレベルは別の高さ</h2>
+    <p>下の2枚は同じ橋を真上から見た図です。ただし<strong>高さが違う2つの水平面</strong>を別々に描いています。
+      対傾構（竹ひご）は側面図でいう<strong>上弦材の高さ</strong>を、デッキ（バルサ板）は<strong>下弦材＝道路面の高さ</strong>
+      を結んでいます（この2つは桁高130mm分だけ上下に離れています）。1枚の図に重ねて描くと高さの違いが伝わらず
+      紛らわしいため分けました。<strong>2枚のgirderの間隔（約74mm）自体は上下で共通</strong>です
+      （デッキ板は幅80mmの支給材をそのまま使い、girderより少し外側までかぶせて乗せる）。</p>
+
+    <div class="drawing-card">
+      <figure>
+        <svg viewBox="0 0 1240 210" role="img" aria-label="平面図その1：上弦材レベル。主構造2枚の上弦材をgirder間隔74mmで結ぶ、竹ひごの水平材11本とジグザグ斜材10本からなる対傾構の配置。">
+          <text class="callout lbl-jp" x="20" y="30" font-weight="600">① 上弦材レベル（対傾構）</text>
+
+          <line class="mbr-wood" x1="130" y1="68" x2="1130" y2="68"></line>
+          <line class="mbr-wood" x1="130" y1="152" x2="1130" y2="152"></line>
+
+          <g class="mbr-bamboo">
+            <line x1="130" y1="68" x2="130" y2="152"></line>
+            <line x1="230" y1="68" x2="230" y2="152"></line>
+            <line x1="330" y1="68" x2="330" y2="152"></line>
+            <line x1="430" y1="68" x2="430" y2="152"></line>
+            <line x1="530" y1="68" x2="530" y2="152"></line>
+            <line x1="630" y1="68" x2="630" y2="152"></line>
+            <line x1="730" y1="68" x2="730" y2="152"></line>
+            <line x1="830" y1="68" x2="830" y2="152"></line>
+            <line x1="930" y1="68" x2="930" y2="152"></line>
+            <line x1="1030" y1="68" x2="1030" y2="152"></line>
+            <line x1="1130" y1="68" x2="1130" y2="152"></line>
+          </g>
+          <g class="mbr-bamboo">
+            <line x1="130" y1="68" x2="230" y2="152"></line>
+            <line x1="230" y1="68" x2="330" y2="152"></line>
+            <line x1="330" y1="68" x2="430" y2="152"></line>
+            <line x1="430" y1="68" x2="530" y2="152"></line>
+            <line x1="530" y1="68" x2="630" y2="152"></line>
+            <line x1="630" y1="152" x2="730" y2="68"></line>
+            <line x1="730" y1="152" x2="830" y2="68"></line>
+            <line x1="830" y1="152" x2="930" y2="68"></line>
+            <line x1="930" y1="152" x2="1030" y2="68"></line>
+            <line x1="1030" y1="152" x2="1130" y2="68"></line>
+          </g>
+
+          <line class="dim-line" x1="70" y1="68" x2="70" y2="152"></line>
+          <line class="dim-line" x1="64" y1="68" x2="76" y2="68"></line>
+          <line class="dim-line" x1="64" y1="152" x2="76" y2="152"></line>
+          <text class="dim-text mono" x="45" y="114" text-anchor="middle" transform="rotate(-90 45 114)">74mm</text>
+        </svg>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--wood)"></i>両girderの上弦材（側面図と同一部材）</span>
+          <span><i class="swatch" style="background:var(--bamboo)"></i>対傾構・水平材＋ジグザグ斜材（竹ひごφ1.8mm・2本束ね推奨）</span>
+        </div>
+      </figure>
+    </div>
+
+    <div class="drawing-card" style="margin-top:14px">
+      <figure>
+        <svg viewBox="0 0 1240 210" role="img" aria-label="平面図その2：下弦材レベル。主構造2枚の下弦材の少し内側の間隔で、幅80mmのバルサ板デッキを上から乗せて接着する。デッキは600mm材2枚を支間中央の節点で継ぐ。">
+          <text class="callout lbl-jp" x="20" y="30" font-weight="600">② 下弦材レベル（道路面・デッキ）</text>
+
+          <rect x="130" y="64" width="1000" height="76" fill="var(--wood-fill)" stroke="var(--wood)" stroke-width="1.5" stroke-dasharray="5 4"></rect>
+          <text class="callout lbl-jp" x="630" y="106" text-anchor="middle">デッキ板（バルサ 幅80×厚3mm）を下弦材の上面に接着</text>
+
+          <!-- girders drawn slightly inset from deck edges to show overlap -->
+          <line class="mbr-wood" x1="130" y1="68" x2="1130" y2="68"></line>
+          <line class="mbr-wood" x1="130" y1="136" x2="1130" y2="136"></line>
+
+          <!-- deck joint at midspan node -->
+          <line x1="630" y1="60" x2="630" y2="144" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"></line>
+          <text class="callout-hi mono" x="630" y="164" text-anchor="middle">継ぎ目＝節点上(x=500mm)</text>
+
+          <line class="dim-line" x1="70" y1="68" x2="70" y2="136"></line>
+          <line class="dim-line" x1="64" y1="68" x2="76" y2="68"></line>
+          <line class="dim-line" x1="64" y1="136" x2="76" y2="136"></line>
+          <text class="dim-text mono" x="45" y="106" text-anchor="middle" transform="rotate(-90 45 106)">girder間隔 約74mm</text>
+
+          <line class="dim-line" x1="130" y1="182" x2="1130" y2="182"></line>
+          <line class="dim-line" x1="130" y1="176" x2="130" y2="188"></line>
+          <line class="dim-line" x1="1130" y1="176" x2="1130" y2="188"></line>
+          <text class="dim-text mono" x="630" y="202" text-anchor="middle">支間 1000mm（600mm材×2枚を継いで確保）</text>
+        </svg>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--wood)"></i>両girderの下弦材＝道路面（側面図と同一部材）</span>
+          <span><i class="swatch" style="background:var(--wood-fill); border:1px solid var(--wood)"></i>デッキ板（バルサ・下弦材の上に橋渡しして乗せる）</span>
+        </div>
+        <figcaption>デッキは下弦材の<strong>間に挟むのではなく、上面に橋渡しして</strong>接着する。80mm幅の板がしっかり両方の下弦材に乗って糊代が取れるよう、girder間隔（下弦材の内側どうしの距離）は80mmよりわずかに狭い約74mmを想定（板が左右に約3mmずつ乗る）。上弦材側（①の図）には付けない。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>デッキ板の継ぎ足し・補強</h2>
+    <p>支給のバルサ板は<strong>80×3×600mm</strong>で、支間1000mmには1枚では足りません。
+      <strong>2枚を継いで使う</strong>前提で計画してください。</p>
+    <ol class="note-list">
+      <li><span class="priority-tag">継ぎ目の位置</span>宙に浮いたパネル途中ではなく、<strong>下弦材の節点（パネル点）の真上</strong>で
+        突き合わせる。この試作図では支間中央の載荷点（x=500mm、node5）に継ぎ目を置くのが自然（下の図の破線）。
+        継ぎ目のすぐ下に垂直材があるため、突き合わせ部が支えのない場所で反るのを防げる。</li>
+      <li><span class="priority-tag">板の使用量</span>600mm材1枚＋もう1枚から400mmを切り出して使用（600+400=1000mm）。
+        余った200mmは対傾構の当て材や補強に転用できる。</li>
+      <li><span class="priority-tag">未検証の注意</span>3mm厚のバルサ単体で25.35kgの集中荷重をそのまま受け止められるかは
+        シミュレータでは検証していません（軸力トラスのみ計算対象のため）。幸い載荷点が下弦材の節点と一致する設計なので
+        直下に垂直材の支えがありますが、心配なら<strong>載荷点をまたぐ1パネル分（x=400〜600mm）だけバルサを2枚重ねにする</strong>、
+        または竹ひごの当て木を裏から添えるなどの局所補強を検討する。本番前に実際の重りに近い荷重で手押し確認を推奨。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>ジグザグ斜材とは何か</h2>
+    <p>対傾構の「水平材」だけでは、下の左図のように長方形のまま横に潰れる（ラッキング）変形を止められません。
+      パネルごとに1本ずつ斜材を対角線状に入れると、長方形が三角形2つに分かれ、部材が伸び縮みしない限り
+      形を保てるようになります。①の図で水平材の間に斜めに入っている線がこれです（主構造の斜材と同じ理屈です）。</p>
+    <div class="drawing-card">
+      <figure>
+        <svg viewBox="0 0 640 200" role="img" aria-label="比較図。水平材だけのパネルは平行四辺形に変形できてしまうが、対角線の斜材を1本加えると三角形2つに分かれて変形しなくなる。">
+          <text class="callout lbl-jp" x="140" y="26" text-anchor="middle" font-weight="600">斜材なし＝変形できる</text>
+          <polygon points="60,50 260,50 260,150 60,150" fill="none" stroke="var(--ink-faint)" stroke-width="2"></polygon>
+          <polygon points="60,50 260,50 300,150 100,150" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4"></polygon>
+          <line class="dim-line" x1="260" y1="50" x2="300" y2="150" marker-end="url(#arrow2)" stroke="var(--accent)"></line>
+          <text class="callout lbl-jp" x="140" y="180" text-anchor="middle">ラッキング（平行四辺形に潰れる）</text>
+
+          <text class="callout lbl-jp" x="500" y="26" text-anchor="middle" font-weight="600">斜材あり＝変形しない</text>
+          <polygon points="420,50 620,50 620,150 420,150" fill="none" stroke="var(--ink)" stroke-width="2"></polygon>
+          <line x1="420" y1="50" x2="620" y2="150" stroke="var(--bamboo)" stroke-width="3"></line>
+          <text class="callout lbl-jp" x="500" y="180" text-anchor="middle">三角形×2＝形が決まる</text>
+
+          <defs>
+            <marker id="arrow2" markerWidth="8" markerHeight="8" refX="4" refY="7" orient="auto">
+              <path d="M0,0 L8,0 L4,8 Z" fill="var(--accent)"></path>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>左：水平材（縦の対傾構）だけのパネルは、部材の長さが変わらなくても全体が平行四辺形にゆがめる＝橋がねじれる自由度が残る。右：対角線の斜材を1本加えると三角形が2つでき、部材の長さが変わらない限り形が固定される。トラスの基本原理（三角形は変形しない）を、幅方向の対傾構にもそのまま適用したもの。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>対傾構（竹ひご）の強度について — 目安計算であり未検証</h2>
+    <p><strong>正直に言うと、対傾構自体の強度はこのシミュレータでは検証できていません。</strong>
+      ツールは支間方向1枚のトラス平面しか計算しない2次元FEMのため、幅方向の対傾構が実際にどれだけ
+      横倒れ・ねじれを防げるかは原理的に対象外です（重量だけは概算に加算済み）。以下は一般的な構造力学の
+      目安計算による参考値で、実物の破壊試験の代わりにはなりません。</p>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="k">上弦材の最大圧縮力（中央区間）</div>
+        <div class="v">239.5 N</div>
+        <div class="s">対傾構が拘束すべき「元の力」</div>
+      </div>
+      <div class="stat">
+        <div class="k">対傾構に必要な拘束力の目安</div>
+        <div class="v">約5〜7 N</div>
+        <div class="s">一般的な目安「被拘束材力の2〜3%」で概算</div>
+      </div>
+      <div class="stat">
+        <div class="k">竹ひご1本（74mm）の座屈耐力</div>
+        <div class="v">14.9 N</div>
+        <div class="s">目安の必要力に対し余裕は小さめ</div>
+      </div>
+      <div class="stat">
+        <div class="k">竹ひご2本束ね（74mm）の座屈耐力</div>
+        <div class="v">29.7 N</div>
+        <div class="s">推奨：余裕が2〜3倍に拡大</div>
+      </div>
+    </div>
+    <p style="margin-top:12px"><strong>結論：竹ひご1本でも目安の上では足りるが余裕が小さいため、
+      対傾構の水平材・斜材とも2本束ねを推奨します。</strong>重量増はわずか+3.5g（118.5g→122.0g）で、
+      竹ひごの支給量使用率も8%→16%と余裕があります。それでも「シミュレータのお墨付き」ではないため、
+      主構造2枚を組んだ段階で対傾構を仮付けし、<strong>手で橋を横方向に押してみて目に見える揺れ・
+      ねじれがないか</strong>を必ず確認してから本接着してください。</p>
+  </section>
+
+  <section>
+    <h2>部材表（Bill of Materials）— 主構造2枚＋デッキ＋対傾構</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>部材</th><th>材料</th><th class="num">1本の長さ</th><th class="num">本数</th><th>束ね</th><th class="num">合計使用長さ</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>下弦材（道路面）</td><td>ヒノキ角棒 5×5mm</td><td class="num">100.0 mm</td><td class="num">20本</td><td>1本</td><td class="num">2.00 m</td></tr>
+          <tr><td>上弦材</td><td>ヒノキ角棒 5×5mm</td><td class="num">100.0 mm</td><td class="num">20本</td><td>1本</td><td class="num">2.00 m</td></tr>
+          <tr><td>垂直材</td><td>ヒノキ角棒 5×5mm</td><td class="num">130.0 mm</td><td class="num">22本</td><td>1本</td><td class="num">2.86 m</td></tr>
+          <tr><td>斜材</td><td>凧糸（純綿水糸）</td><td class="num">164.0 mm</td><td class="num">20区間</td><td><strong>3本束ね</strong></td><td class="num">9.84 m</td></tr>
+          <tr><td>対傾構・水平材</td><td>竹ひご φ1.8mm</td><td class="num">74.0 mm</td><td class="num">11本</td><td><strong>2本束ね</strong></td><td class="num">1.63 m</td></tr>
+          <tr><td>対傾構・斜材</td><td>竹ひご φ1.8mm</td><td class="num">124.4 mm</td><td class="num">10本</td><td><strong>2本束ね</strong></td><td class="num">2.49 m</td></tr>
+          <tr><td>走行面デッキ</td><td>バルサ板（厚3mm・600mm材×2枚を継ぐ）</td><td class="num">幅80×長1000</td><td class="num">1枚</td><td>—</td><td class="num">約36 g</td></tr>
+        </tbody>
+        <tfoot>
+          <tr><td colspan="5">支給量に対する使用率</td><td class="num">ヒノキ5: 76%／凧糸: 33%／竹ひご: 15%</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <p style="margin-top:10px">節点座標は10パネル×100mm間隔で下弦材y=0・上弦材y=130mm（支間端0〜1000mm）。対傾構・デッキの重量はシミュレータの概算加算機能によるもので、対傾構の強度自体は未検証（<a href="https://nadalbrian045-afk.github.io/bridge-simulator/" style="color:var(--focus)">公開シミュレータ</a>のガイド8章参照）。</p>
+  </section>
+
+  <section>
+    <h2>組み立て・接着の優先メモ</h2>
+    <ol class="note-list">
+      <li><span class="priority-tag">最優先</span>上弦材の中央2区間（x=400〜600mm、側面図の破線間）が構造全体で最も力を受ける（安全率1.93）。ここの上弦材と隣接する垂直材・斜材の接合部から先に接着し、載荷試験までの養生時間を最も長く確保する。</li>
+      <li><span class="priority-tag">機械的固定</span>凧糸の斜材端部は接着剤だけに頼らず、節点の小穴に通す・小さなピンに巻き付けるなどして機械的に絡めてから接着する（ただの接着では引き抜け方向の強度が出ない）。</li>
+      <li><span class="priority-tag">仮止め→本接着</span>アロンアルファは位置決めの仮止めに少量だけ使い、木工用ボンドを構造接合の主役にする。アロンアルファは上記の中央2区間まわりの接合部に優先配分する。</li>
+      <li><span class="priority-tag">面で当てる</span>斜材が弦材に当たる角度は、当たる面を平らに削って接着面積を確保する（点当てのまま接着しない）。</li>
+      <li><span class="priority-tag">対傾構は後回し可</span>主構造2枚を組んでから対傾構・デッキを取り付ける順で問題ない。ただし橋体幅120mm以内に収まるか、対傾構の竹ひごが斜材の凧糸と干渉しないかを仮組み段階で確認する。</li>
+    </ol>
+  </section>
+
+  <footer>
+    構造検討ツール（<span class="mono">bridge-simulator</span>）の候補探索・部材別チェックに基づく試作図。安全率・たわみは軸力トラスの2次元FEM概算であり、接合部の実強度・幅方向の安定性は別途現物で確認すること。寸法は10mm単位で丸めていないため、切断時は指定値通りに測ること。
+  </footer>
+
+</div>
+
+</body>
+</html>
